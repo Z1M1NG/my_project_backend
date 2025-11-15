@@ -1,0 +1,26 @@
+POST http://127.0.0.1:8000/api/log
+Content-Type: application/json
+
+{
+  "data": [
+    {
+      "name": "windows_patches",
+      "hostname": "my-windows-laptop",
+      "columns": {
+        "hotfix_id": "KB5031356",
+        "caption": "https://support.microsoft.com/kb/KB5031356"
+      },
+      "unixTime": 1731231898
+    },
+    {
+      "name": "open_sockets",
+      "hostname": "my-windows-laptop",
+      "columns": {
+        "pid": "1234",
+        "port": "443",
+        "address": "104.26.10.189"
+      },
+      "unixTime": 1731231899
+    }
+  ]
+}

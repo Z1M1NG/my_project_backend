@@ -1,0 +1,14 @@
+# Virtual Environment
+venv/
+
+# Python cache
+__pycache__/
+
+# Secrets file
+config.py
+
+# ML model files (for later)
+*.pkl
+
+# VS Code settings
+.vscode/
