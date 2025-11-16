@@ -1,13 +1,11 @@
 import datetime
 import os
 import ollama  # <-- Ollama is now included
+import scoring_engine
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 from typing import List, Dict, Any
 from elasticsearch import Elasticsearch, ConnectionError as ESConnectionError
-
-# Import your custom-built ML engine
-import scoring_engine
 
 # --- 1. Import Secrets and Initialize ---
 try:
