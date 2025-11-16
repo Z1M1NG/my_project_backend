@@ -1,0 +1,32 @@
+# ------------------------------
+# Virtual Environment
+# Ignore the venv folder where Python dependencies are installed
+venv/
+
+# ------------------------------
+# Python cache and compiled files
+# Ignore Python cache directories and compiled bytecode
+__pycache__/
+*.__pycache__      # catches any other __pycache__ variants
+*.pyc              # compiled Python files
+*.pyo              # optimized compiled Python files
+
+# ------------------------------
+# Secrets / configuration files
+# Do not commit files containing secrets or sensitive info
+config.py
+.env                # if you have a .env file for environment variables
+
+# ------------------------------
+# Machine Learning model files
+# Ignore large model files; commit only if needed
+*.pkl
+
+# ------------------------------
+# IDE / Editor settings
+# Ignore VS Code workspace and settings folders
+.vscode/
+
+# ------------------------------
+# Miscellaneous / Environment files
+.Environment        # optional, ignore any custom environment files
