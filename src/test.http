@@ -1,0 +1,36 @@
+POST http://127.0.0.1:8000/api/log
+Content-Type: application/json
+
+{
+  "data": [
+    {
+      "name": "windows_firewall_status",
+      "hostname": "workstation-01",
+      "columns": {
+        "profile": "public",
+        "enable": "0" 
+      },
+      "unixTime": 1731231898
+    },
+    {
+      "name": "process_events",
+      "hostname": "workstation-01",
+      "columns": {
+        "name": "chrome.exe",
+        "cpu_usage_percent": "15.2",
+        "memory_mb": "150"
+      },
+      "unixTime": 1731231899
+    },
+    {
+      "name": "process_events",
+      "hostname": "workstation-01",
+      "columns": {
+        "name": "powershell.exe",
+        "cpu_usage_percent": "98.5",
+        "memory_mb": "1200"
+      },
+      "unixTime": 1731231900
+    }
+  ]
+}
