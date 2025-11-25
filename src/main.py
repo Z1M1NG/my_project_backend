@@ -20,7 +20,11 @@ app = FastAPI(title="Security API")
 os.environ["no_proxy"] = "localhost,127.0.0.1"
 try:
     es_host = "http://127.0.0.1:9200"
-    es = Elasticsearch(es_host, basic_auth=("elastic", ELASTIC_PASSWORD))
+    es = Elasticsearch(
+        es_host, 
+        basic_auth=("elastic", ELASTIC_PASSWORD),
+        request_timeout=30
+    )
     if not es.ping():
         raise ESConnectionError("Ping failed.")
     print(f"Successfully connected to Elasticsearch at {es_host}")
