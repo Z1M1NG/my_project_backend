@@ -1,17 +1,8 @@
-POST http://192.168.180.131:8000/api/log
+POST http://127.0.0.1:8000/api/log
 Content-Type: application/json
 
 {
   "data": [
-    {
-      "name": "missing_patches",
-      "hostname": "test-laptop-01",
-      "columns": {
-        "hotfix_id": "KB5039999",
-        "title": "Critical Security Update"
-      },
-      "unixTime": 1763574001
-    },
     {
       "name": "windows_firewall_status",
       "hostname": "test-laptop-01",
@@ -19,7 +10,7 @@ Content-Type: application/json
         "profile": "public",
         "enable": "0" 
       },
-      "unixTime": 1763574002
+      "unixTime": 1763574001
     },
     {
       "name": "antivirus_product",
@@ -28,16 +19,7 @@ Content-Type: application/json
         "name": "Windows Defender",
         "state": "Off"
       },
-      "unixTime": 1763574003
-    },
-    {
-      "name": "bitlocker_info",
-      "hostname": "test-laptop-01",
-      "columns": {
-        "drive_letter": "C:",
-        "protection_status": "0"
-      },
-      "unixTime": 1763574004
+      "unixTime": 1763574002
     },
     {
       "name": "listening_ports",
@@ -46,16 +28,7 @@ Content-Type: application/json
         "port": "3389",
         "protocol": "TCP"
       },
-      "unixTime": 1763574005
-    },
-    {
-      "name": "chrome_extensions",
-      "hostname": "test-laptop-01",
-      "columns": {
-        "name": "Google Docs Offline",
-        "identifier": "ghbmnnjooekpmoecnnnilnnbdlolhkhi"
-      },
-      "unixTime": 1763574006
+      "unixTime": 1763574003
     },
     {
       "name": "chrome_extensions",
@@ -64,7 +37,7 @@ Content-Type: application/json
         "name": "PDF Toolbox (Malware)",
         "identifier": "bknbnapeddgekkfibcgodbbdnfjcalmk"
       },
-      "unixTime": 1763574007
+      "unixTime": 1763574004
     },
     {
       "name": "programs",
@@ -72,17 +45,7 @@ Content-Type: application/json
       "columns": {
         "name": "uTorrent Web"
       },
-      "unixTime": 1763574008
-    },
-    {
-      "name": "process_events",
-      "hostname": "test-laptop-01",
-      "columns": {
-        "name": "notepad.exe",
-        "cpu_usage_percent": "12.5",
-        "memory_mb": "45.0"
-      },
-      "unixTime": 1763574009
+      "unixTime": 1763574005
     },
     {
       "name": "process_events",
@@ -92,33 +55,7 @@ Content-Type: application/json
         "cpu_usage_percent": "99.1",
         "memory_mb": "1500.0"
       },
-      "unixTime": 1763574010
-    },
-    {
-      "name": "windows_event_log",
-      "hostname": "test-laptop-01",
-      "columns": {
-        "eventid": "4625",
-        "data": "{\"TargetUserName\": \"admin_user\"}"
-      },
-      "unixTime": 1763574011
-    },
-    {
-      "name": "fim",
-      "hostname": "test-laptop-01",
-      "columns": {
-        "target_path": "C:\\Windows\\System32\\drivers\\etc\\hosts",
-        "action": "modified"
-      },
-      "unixTime": 1763574012
-    },
-    {
-      "name": "logged_in_users",
-      "hostname": "test-laptop-01",
-      "columns": {
-        "user": "SuspiciousAdmin"
-      },
-      "unixTime": 1763574013
+      "unixTime": 1763574006
     }
   ]
 }
