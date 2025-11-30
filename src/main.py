@@ -14,8 +14,9 @@ from colorama import Fore, Style, init
 init(autoreset=True)
 
 # --- AI CONFIGURATION ---
-AI_COOLDOWN_SECONDS = 300  # Only call AI once per hour per host
+AI_COOLDOWN_SECONDS = 300  # 5 Minutes (Good for Demo)
 last_ai_call = {}           # Dictionary to track timestamps: {'hostname': unix_timestamp}
+AI_MODEL_NAME = 'llama3'    # Ensure this model is pulled in Ollama
 
 # --- 1. Initialize ---
 try:
@@ -24,158 +25,135 @@ except ImportError:
     print(Fore.RED + "FATAL: config.py not found. Please create it.")
     exit()
 
-# AsyncElasticsearch here.
 app = FastAPI(title="Security API")
 
 # --- Connection Block (ASYNC) ---
 # Setting no_proxy environment variable to bypass potential proxy issues for local connections
 os.environ["no_proxy"] = "localhost,127.0.0.1"
+
 try:
     es_host = "http://127.0.0.1:9200"
     es = AsyncElasticsearch(es_host, basic_auth=("elastic", ELASTIC_PASSWORD))
     print(Fore.GREEN + f"Successfully initialized Async client for {es_host}")
 except Exception as e:
-    # Catch FATAL errors here if the initialization fails
-    print(Fore.RED + f"FATAL: Error initializing Async client: {e}")
-    es = None
+    print(Fore.RED + f"FATAL: Could not connect to Elastic: {e}")
+    exit()
 
-# --- Data Models (Pydantic Validation) ---
-class OsqueryLog(BaseModel):
-    name: str
-    hostname: str
-    columns: Dict[str, Any]
-    unixTime: int = Field(alias="unixTime")
+# --- Data Models ---
+class LogBatch(BaseModel):
+    data: List[Dict[str, Any]]
 
-class OsqueryLogPacket(BaseModel):
-    data: List[OsqueryLog]
-
-# --- Helper: Threat Intelligence (ASYNC) ---
-async def get_threat_intel() -> Dict[str, List[str]]:
-    """Fetches threat intelligence lists from Elasticsearch asynchronously."""
-    intel = {"ext_allow_list": [], "ext_block_list": [], "app_allow_list": [], "app_block_list": []}
-    if not es: return intel
+# --- HELPER: Fetch Threat Intel ---
+async def fetch_allow_list():
+    """
+    Fetches the Allow List from Elasticsearch to pass to the scoring engine.
+    This ensures the Rules/ML respect the dynamic whitelist.
+    """
     try:
-        # All es.search calls MUST be awaited
-        res = await es.search(index="intel-blocklist", size=1000, ignore=[404])
-        if res.get("hits"): intel["ext_block_list"] = [h["_source"]["identifier"] for h in res["hits"]["hits"]]
-
-        res = await es.search(index="intel-allowlist", size=1000, ignore=[404])
-        if res.get("hits"): intel["ext_allow_list"] = [h["_source"]["identifier"] for h in res["hits"]["hits"]]
-
-        res = await es.search(index="intel-app-blocklist", size=1000, ignore=[404])
-        if res.get("hits"): intel["app_block_list"] = [h["_source"]["name"] for h in res["hits"]["hits"]]
+        # Query your intel-allowlist index
+        # Fetch up to 1000 allowed items
+        resp = await es.search(index="intel-allowlist", size=1000, query={"match_all": {}})
+        hits = resp['hits']['hits']
         
-        res = await es.search(index="intel-app-allowlist", size=1000, ignore=[404])
-        if res.get("hits"): intel["app_allow_list"] = [h["_source"]["name"] for h in res["hits"]["hits"]]
-        
+        # Convert to a list of dicts: [{'app_name': 'valorant.exe'}, ...]
+        allow_list = [hit['_source'] for hit in hits]
+        return allow_list
     except Exception as e:
-        print(Fore.YELLOW + f"Warning: Could not fetch threat intel: {e}", flush=True)
-    return intel
+        print(Fore.YELLOW + f"⚠️ Warning: Could not fetch Allow List from ES: {e}")
+        return []
 
-# --- API Endpoints ---
-@app.get("/")
-def read_root():
-    return {"status": "API is running."}
+# --- API ENDPOINTS ---
 
-# FIX: Changed endpoint to async def to handle await calls
 @app.post("/api/log")
-async def handle_osquery_log(log_packet: OsqueryLogPacket):
-    if not es:
-        raise HTTPException(status_code=500, detail="Elasticsearch client is not initialized.")
+async def receive_log(batch: LogBatch):
+    logs = batch.data
+    if not logs:
+        return {"status": "empty"}
+
+    host = logs[0].get("hostname", "Unknown")
     
-    # Check connectivity before proceeding (uses await es.ping())
-    if not (await es.ping()):
-        raise HTTPException(status_code=503, detail="Elasticsearch ping failed during request. Check if ES is running.")
+    # 1. Fetch Intelligence (Allow List)
+    allow_list = await fetch_allow_list()
 
-    print(Fore.CYAN + f"\n--- Received Batch of {len(log_packet.data)} logs ---", flush=True)
+    # 2. Score Logs (Passing the Allow List)
+    total_score, risks = scoring_engine.score_logs(logs, allow_list=allow_list)
     
-    # Await Threat Intel Fetch
-    threat_context = await get_threat_intel()
-    host_scores = {}
-    host_summaries = {}
+    # 3. Determine Status
+    health_status = scoring_engine.categorize_health(total_score)
+    
+    # Print summary to console
+    color = Fore.GREEN if health_status == "Healthy" else Fore.RED
+    print(f"📥 Received {len(logs)} logs from {host} | Score: {color}{total_score} ({health_status})")
 
-    # --- FAST LOOP (Low CPU Usage) ---
-    for log in log_packet.data:
-        log_dict = log.dict()
-        hostname = log_dict.get("hostname")
+    # 4. Save Raw Logs to Elasticsearch
+    # We do this asynchronously so we don't block the scoring
+    # Prepare bulk actions could be optimized, but indexing one by one for simplicity in FYP
+    for log in logs:
+        log["processed_at"] = datetime.datetime.now()
+        await es.index(index="osquery-logs", document=log)
 
-        # Call ML Engine (Synchronous call to the imported module)
-        risk_score, summary = scoring_engine.process_log(log_dict, context=threat_context)
+    # 5. AI Analysis (If Critical)
+    if total_score >= 50: # Trigger on Warning (50) or Critical (100)
+        final_summary = "No AI Analysis needed."
         
-        if risk_score > 0:
-             print(f"  {Fore.YELLOW}⚠ Risk Found! {log.name}: {risk_score} pts - {summary}", flush=True)
-
-        host_scores.setdefault(hostname, 0)
-        host_summaries.setdefault(hostname, [])
-        host_scores[hostname] += risk_score
-        if summary:
-            host_summaries[hostname].append(summary)
-
-        # Save Raw Log
-        log_to_save = {
-            "timestamp": datetime.datetime.utcfromtimestamp(log.unixTime),
-            "hostname": log.hostname,
-            "query_name": log.name,
-            "risk_score": risk_score,
-            "summary_text": summary,
-            "raw_data": log.columns
-        }
-        try:
-            # FIX: Await es.index for non-blocking write
-            await es.index(index="osquery-logs", document=log_to_save)
-        except Exception as e:
-            print(Fore.RED + f"Error saving log: {e}", flush=True)
-            
-    # --- PROCESS TOTALS & AI ALERTS ---
-    current_time = time.time()
-
-    for host, total_score in host_scores.items():
-        health_status = scoring_engine.categorize_health(total_score)
-        final_summary = ". ".join(host_summaries[host])
+        # Check Cooldown
+        current_time = time.time()
+        last_time = last_ai_call.get(host, 0)
         
-        # --- AI LOGIC (Still Synchronous, but isolated) ---
-        if health_status == "At Risk (Flagged)":
-            last_call = last_ai_call.get(host, 0)
+        if (current_time - last_time) > AI_COOLDOWN_SECONDS:
+            print(Fore.CYAN + f"   ⚠️ High Risk Detected! Invoking {AI_MODEL_NAME}...", flush=True)
             
-            if (current_time - last_call) > AI_COOLDOWN_SECONDS:
-                print(Fore.RED + Style.BRIGHT + f"\n🚨 ALERT: Host '{host}' is AT RISK! (Score: {total_score})", flush=True)
-                print(Fore.CYAN + "   Calling Ollama for summary...", flush=True)
-                
-                try:
-                    prompt = f"Host '{host}' is 'At Risk' (Score: {total_score}). Summarize these alerts in one concise sentence: {final_summary}"
-
-                    def run_ollama():
-                        return ollama.chat(
-                            model='llama3', 
-                            messages=[{'role': 'user', 'content': prompt}]
-                        )
-                    response = await asyncio.to_thread(run_ollama)
-
-                    final_summary = response['message']['content']
-                    print(Fore.GREEN + f"   🤖 AI Summary: {final_summary}\n", flush=True)
-
-                    last_ai_call[host] = current_time
-
-                except Exception as e:
-                    print(Fore.RED + f"   ❌ Ollama call failed: {e}", flush=True)
-                    final_summary = f"(AI FAILED) {final_summary}"
-            else:
-                print(Fore.YELLOW + f"   Skipping AI for '{host}' (Cooldown active).", flush=True)
-                final_summary = f"(AI Cooldown) {final_summary}"
+            # --- CONTEXT WINDOW PROTECTION ---
+            # We sort risks by score descending and take the top 15
+            # This prevents crashing Llama 3 with too much text
+            sorted_risks = sorted(risks, key=lambda x: x['score'], reverse=True)[:15]
             
-            # Save Host Status
+            # --- PROMPT ENGINEERING ---
+            prompt = (
+                f"You are a Cybersecurity Analyst. Analyze these system logs for host '{host}'.\n"
+                f"Total Risk Score: {total_score} (Threshold: 50).\n\n"
+                f"Top Anomalies Detected:\n{sorted_risks}\n\n"
+                f"Instructions:\n"
+                f"1. Summarize the suspicious behavior in 2-3 sentences.\n"
+                f"2. Identify if this looks like Malware, C2 activity, or Persistence.\n"
+                f"3. Recommend 3 specific remediation steps.\n"
+                f"Output Format: Plain text, concise."
+            )
+
+            try:
+                # Run Ollama in a separate thread to not block FastAPI
+                def run_ollama():
+                    return ollama.chat(
+                        model=AI_MODEL_NAME, 
+                        messages=[{'role': 'user', 'content': prompt}]
+                    )
+                response = await asyncio.to_thread(run_ollama)
+
+                final_summary = response['message']['content']
+                print(Fore.GREEN + f"   🤖 AI Summary Generated.\n", flush=True)
+
+                last_ai_call[host] = current_time
+
+            except Exception as e:
+                print(Fore.RED + f"   ❌ Ollama call failed: {e}", flush=True)
+                final_summary = f"AI Generation Failed: {str(e)}"
+        else:
+            print(Fore.YELLOW + f"   Skipping AI for '{host}' (Cooldown active).", flush=True)
+            final_summary = "(AI Cooldown Active)"
+        
+        # 6. Save Alert/Summary to 'host-health-status' Index
         health_document = {
             "timestamp": datetime.datetime.now(),
             "hostname": host,
             "total_risk_score": total_score,
             "health_status": health_status,
-            "ai_summary": final_summary
+            "ai_summary": final_summary,
+            "top_risks": risks[:10] # Store top 10 risks in the alert doc for easy dashboard viewing
         }
-            
+        
         try:
-            # FIX: Await es.index for non-blocking write
             await es.index(index="host-health-status", document=health_document)
         except Exception as e:
             print(Fore.RED + f"Error saving status: {e}", flush=True)
-                
-    return {"status": "ok", "logs_processed": len(log_packet.data)}
+
+    return {"status": "processed", "score": total_score}

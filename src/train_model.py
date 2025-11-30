@@ -1,60 +1,85 @@
 import joblib
 import numpy as np
+import pandas as pd
+import os
 from sklearn.ensemble import IsolationForest
+from colorama import Fore, init
 
-print("Training anomaly detection model for processes...")
+# Initialize colorama
+init(autoreset=True)
 
-# 1. SIMULATED "NORMAL" DATA
-# We need to teach the model that BOTH "idle" and "heavy work" are normal.
+# --- CONFIGURATION ---
+MODEL_FILENAME = 'process_anomaly_model.pkl'
+# Ensure you generate a NEW log file with the updated osquery_shipper.py before training!
+REAL_DATA_FILE = r"E:\schoolwork\Yr3\Sem_2\FYP\my_project_backend\src\RealLife_logs.csv" 
 
-np.random.seed(42)
+print(Fore.CYAN + "Training anomaly detection model for processes...")
 
-# Cluster A: "Idle / Light Tasks" (Browsing, Word, Background services)
-# CPU: 0-30%, Memory: 50-500 MB
-idle_cpu = np.random.normal(loc=10, scale=10, size=3000)
-idle_mem = np.random.normal(loc=200, scale=100, size=3000)
+# 1. LOAD REAL DATA
+if os.path.exists(REAL_DATA_FILE):
+    print(Fore.GREEN + f"Loading REAL data from {REAL_DATA_FILE}...")
+    
+    try:
+        # Read the CSV
+        df = pd.read_csv(REAL_DATA_FILE)
+        
+        # --- CRITICAL CHANGE: DATA PREPROCESSING ---
+        # The updated osquery_shipper.py sends:
+        # 'raw_data.cpu_usage_percent' (0-100 scale)
+        # 'raw_data.memory_mb' (Size in MB)
+        
+        # 1. Define column names (Flattened JSON often uses dot notation)
+        cpu_col = 'raw_data.cpu_usage_percent'
+        mem_col = 'raw_data.memory_mb'
 
-# Cluster B: "Heavy Legitimate Work" (Compiling, Rendering, Gaming)
-# CPU: 60-100%, Memory: 1000-4000 MB
-heavy_cpu = np.random.normal(loc=80, scale=15, size=1000)
-heavy_mem = np.random.normal(loc=2500, scale=800, size=1000)
+        # 2. Check if columns exist
+        if cpu_col not in df.columns or mem_col not in df.columns:
+            print(Fore.RED + f"❌ Error: Columns '{cpu_col}' or '{mem_col}' not found in CSV.")
+            print("Available columns:", df.columns)
+            exit(1)
 
-# Combine them into one "Normal" dataset
-cpu_data = np.concatenate([idle_cpu, heavy_cpu])
-mem_data = np.concatenate([idle_mem, heavy_mem])
+        # 3. Clean Data: Convert to numeric, turn errors (text/empty) into 0
+        df['cpu'] = pd.to_numeric(df[cpu_col], errors='coerce').fillna(0)
+        df['mem'] = pd.to_numeric(df[mem_col], errors='coerce').fillna(0)
+        
+        # 4. Create the training dataset (2 features: CPU, Memory)
+        training_data = df[['cpu', 'mem']].values
+        
+        print(Fore.CYAN + f"Training on {len(training_data)} real data points.")
+        print(f"Sample data head:\n{training_data[:5]}")
+        
+        # 2. TRAIN MODEL
+        # contamination=0.01: We assume 1% of your TRAINING logs might be outliers.
+        # Ensure your training logs include Gaming/Heavy usage so they aren't marked as outliers!
+        model = IsolationForest(contamination=0.01, random_state=42)
+        model.fit(training_data)
+        
+        # 3. SAVE MODEL
+        joblib.dump(model, MODEL_FILENAME)
+        print(Fore.GREEN + f"✅ Success! Model trained on real data and saved as '{MODEL_FILENAME}'")
+        
+    except Exception as e:
+        print(Fore.RED + f"❌ Error processing CSV file: {e}")
+        exit(1)
 
-# Clip values to realistic bounds (0-100% CPU, >0 Memory)
-cpu_data = np.clip(cpu_data, 0, 100)
-mem_data = np.clip(mem_data, 0, 16000) # Max 16GB
+else:
+    print(Fore.YELLOW + f"⚠️ Warning: '{REAL_DATA_FILE}' not found.")
+    exit(1)
 
-# Stack into the format [CPU, Memory]
-training_data = np.column_stack((cpu_data, mem_data))
+# 4. VERIFICATION TEST
+print(Fore.CYAN + "\n--- Testing Model with Sample Data ---")
 
-print(f"Training on {len(training_data)} data points (Idle + Heavy Work).")
+# Test 1: IDLE (Should be Normal/1)
+test_idle = [[0, 25]] 
+pred_idle = model.predict(test_idle)[0]
+print(f"Idle Process (0 CPU, 25MB Mem): {pred_idle} (Expected: 1)")
 
-# 2. CREATE AND TRAIN THE MODEL
-# We use 'contamination=0.005' (0.5%) because we are now including heavy work
-# as "normal", so true anomalies should be rare.
-model = IsolationForest(contamination=0.005, random_state=42)
-model.fit(training_data)
+# Test 2: GAMING (Should be Normal/1 IF you trained on gaming data)
+test_gaming = [[40, 2500]] 
+pred_gaming = model.predict(test_gaming)[0]
+print(f"Gaming Process (40 CPU, 2.5GB Mem): {pred_gaming} (Should be 1 if trained properly)")
 
-# 3. SAVE THE MODEL
-model_filename = 'process_anomaly_model.pkl'
-joblib.dump(model, model_filename)
-print(f"Model trained and saved as '{model_filename}'")
-
-# 4. TEST THE MODEL (Verification)
-print("\n--- Testing Predictions ---")
-
-# Normal Idle (Should be 1)
-print(f"Idle (10% CPU, 200MB Mem):   {model.predict([[10, 200]])[0]}")
-
-# Normal Heavy Work (Should be 1) <-- This is the fix!
-print(f"Heavy Work (90% CPU, 3GB Mem): {model.predict([[90, 3000]])[0]} (Should be 1)")
-
-# Anomaly: Crypto Miner (High CPU, Very Low Memory)
-# Miners often use max CPU but very little RAM compared to a real heavy app like Photoshop.
-print(f"Miner (99% CPU, 10MB Mem):    {model.predict([[99, 10]])[0]} (Should be -1)")
-
-# Anomaly: Memory Leak (Low CPU, Huge Memory)
-print(f"Leak (5% CPU, 10GB Mem):      {model.predict([[5, 10000]])[0]} (Should be -1)")
+# Test 3: IMPOSSIBLE ANOMALY (Should be Anomaly/-1)
+test_anomaly = [[1000, 4000]] 
+pred_anomaly = model.predict(test_anomaly)[0]
+print(f"Anomaly (1000 CPU, 4GB Mem): {pred_anomaly} (Expected: -1)")

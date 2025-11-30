@@ -14,68 +14,76 @@ HEADERS = {'Content-Type': 'application/json'}
 # --- OSQUERY CONFIGURATION (Queries must be valid Windows SQL) ---
 QUERIES = {
     "system_info": "SELECT hostname, computer_name, os_version, physical_memory FROM system_info;",
-    "process_status": "SELECT name, path, pid, CAST(resident_size / 1024 / 1024 AS TEXT) AS memory_mb, CAST(user_time / 1000000 AS INTEGER) AS cpu_seconds FROM processes LIMIT 25;",
+    
+    # CHANGE 1: Removed "WHERE percent_processor_time > 0" filter.
+    # We MUST capture idle processes (0% CPU) so the ML model learns what 'Normal' looks like.
+    # Added 'cmdline' for better forensic analysis.
+    "process_events": "SELECT name, path, cmdline, pid, CAST(percent_processor_time AS TEXT) AS cpu_usage_percent, CAST(resident_size / 1024 / 1024 AS TEXT) AS memory_mb FROM processes;",
+    
+    # CHANGE 2: Added Network Socket monitoring (Outbound connections) to detect C2 callbacks
+    "open_sockets": "SELECT DISTINCT socket_type, local_port, remote_address, remote_port, path FROM process_open_sockets WHERE remote_port > 0;",
+    
+    # CHANGE 3: Added Startup Items (Persistence monitoring)
+    "startup_items": "SELECT name, path, status, source FROM startup_items;",
+
     "listening_ports": "SELECT address, port, protocol, pid FROM listening_ports WHERE address = '0.0.0.0';",
     "programs": "SELECT name, version, publisher FROM programs LIMIT 100;",
     "patches": "SELECT hotfix_id, installed_on FROM patches;",
     "logged_in_users": "SELECT user, terminal FROM logged_in_users;",
-    "antivirus_status": "SELECT name, status, start_mode FROM services WHERE name IN ('WinDefend', 'MpsSvc');"
+    "antivirus_status": "SELECT name, status, start_mode FROM services WHERE name IN ('WinDefend', 'MpsSvc');",
+    "windows_firewall_status": "SELECT * FROM services WHERE name = 'MpsSvc';",
+    "chrome_extensions": "SELECT name, identifier, version FROM chrome_extensions;",
+    "fim": "SELECT * FROM file_events;"
 }
 
-
-# --- 1. Execution Function (Runs Osquery) ---
-def run_all_queries() -> List[Dict[str, Any]]:
-    """Executes all defined OSquery SQL queries via the interactive shell."""
-    
-    # 1. FIX: Use 'with' block for reliable cleanup, or manually close/terminate
-    instance = None
+# --- 1. Collection Function ---
+def collect_logs() -> List[Dict[str, Any]]:
+    """Spawns an ephemeral osqueryi instance and runs the queries."""
     log_data = []
-
-    try:
-        # We use osquery.SpawnInstance() to launch the process and get the client connection.
-        instance = osquery.SpawnInstance()
-        instance.open() 
-        
-        # Get the query client
-        query_client = instance.client 
     
+    # Spawn instance
+    try:
+        instance = osquery.SpawnInstance()
+        instance.open()
     except Exception as e:
-        print(f"Error opening osquery client: {e}")
+        print(f"Error spawning osquery instance: {e}")
         return []
 
-    log_data = []
-    unix_time = int(time.time())
+    print(f"\n--- Starting Log Collection at {datetime.now()} ---")
 
-    for name, query in QUERIES.items():
+    for query_name, sql_query in QUERIES.items():
         try:
-            # 2. Execute query using the correct object
-            result = query_client.query(query)
+            # Run the query
+            results = instance.client.query(sql_query)
             
-            # 3. Format results
-            for row in result.response:
-                log_data.append({
-                    "name": name,
-                    "hostname": os.environ.get('COMPUTERNAME', 'Windows-Agent'),
-                    "columns": row,
-                    "unixTime": unix_time
-                })
+            if results.response:
+                for row in results.response:
+                    # Enrich with metadata
+                    log_entry = {
+                        "timestamp": datetime.now().isoformat(),
+                        "hostname": os.environ.get("COMPUTERNAME", "Unknown-PC"),
+                        "query_name": query_name,
+                        "raw_data": row # The actual SQL result columns
+                    }
+                    log_data.append(log_entry)
+            else:
+                 pass # No data returned (normal for some queries)
+
         except Exception as e:
-            # This will usually catch "no such table" errors now that the client is open
-            print(f"Query '{name}' failed: {e}")
-    
-    # --- FIX 2: Correctly close the connection and terminate the process ---
+            print(f"Error executing query '{query_name}': {e}")
+
+    # --- Clean up OSquery process ---
     if instance:
         try:
             instance.client.close()  # Close the named pipe connection
             instance.terminate()     # Terminate the launched osqueryi process
             print("OSquery instance terminated successfully.")
         except Exception as e:
-            # This handles the Windows error we saw in the traceback
             print(f"Warning: Failed to cleanly terminate OSquery process. Error: {e}")
 
     return log_data
 
-# --- 2. Transmission Function (Remains the same) ---
+# --- 2. Transmission Function ---
 def send_data_to_api(logs: List[Dict[str, Any]]):
     """Sends the collected logs to the FastAPI endpoint."""
     if not logs:
@@ -99,6 +107,8 @@ def send_data_to_api(logs: List[Dict[str, Any]]):
 
 
 if __name__ == "__main__":
-    # Ensure the osqueryd service is stopped before running this shipper
-    collected_logs = run_all_queries()
+    # 1. Collect
+    collected_logs = collect_logs()
+    
+    # 2. Send
     send_data_to_api(collected_logs)
