@@ -12,8 +12,7 @@ from colorama import Fore, init
 
 init(autoreset=True)
 
-# --- DEMO CONFIGURATION ---
-# Set to 5 Minutes (300s) for presentation purposes.
+# --- CONFIGURATION ---
 AI_COOLDOWN_SECONDS = 300 
 last_ai_call = {}
 AI_MODEL_NAME = 'llama3'
@@ -47,14 +46,28 @@ async def fetch_allow_list():
     except Exception:
         return []
 
+# --- FIX: ADDED BLOCK LIST FETCH ---
+async def fetch_block_list():
+    try:
+        # Matches your Elasticvue index name
+        resp = await es.search(index="intel-app-blocklist", size=1000, query={"match_all": {}})
+        return [hit['_source'] for hit in resp['hits']['hits']]
+    except Exception:
+        return []
+
 @app.post("/api/log")
 async def receive_log(batch: LogBatch):
     logs = batch.data
     if not logs: return {"status": "empty"}
 
     host = logs[0].get("hostname", "Unknown")
+    
+    # 1. Fetch Intelligence
     allow_list = await fetch_allow_list()
-    total_score, risks = scoring_engine.score_logs(logs, allow_list=allow_list)
+    block_list = await fetch_block_list() # <-- NEW
+
+    # 2. Score Logs (Pass BLOCK LIST)
+    total_score, risks = scoring_engine.score_logs(logs, allow_list=allow_list, block_list=block_list)
     health_status = scoring_engine.categorize_health(total_score)
     
     color = Fore.GREEN if health_status == "Healthy" else Fore.RED
@@ -71,14 +84,11 @@ async def receive_log(batch: LogBatch):
         current_time = time.time()
         last_time = last_ai_call.get(host, 0)
         
-        # Check if 5 minutes have passed
         if (current_time - last_time) > AI_COOLDOWN_SECONDS:
             print(Fore.CYAN + f"   ⚠️ High Risk! Invoking {AI_MODEL_NAME}...", flush=True)
             
-            # Only take Top 5 risks
             sorted_risks = sorted(risks, key=lambda x: x['score'], reverse=True)[:5]
             
-            # This forces consistency and brevity.
             prompt = (
                 f"Role: Security Analyst. System: '{host}' (Score: {total_score}).\n"
                 f"Anomalies:\n{sorted_risks}\n\n"
@@ -95,7 +105,6 @@ async def receive_log(batch: LogBatch):
                     return ollama.chat(
                         model=AI_MODEL_NAME, 
                         messages=[{'role': 'user', 'content': prompt}],
-                        # 'num_predict': 120 forces the AI to stop generating after ~100 words.
                         options={'num_predict': 120} 
                     )
                 
@@ -108,6 +117,7 @@ async def receive_log(batch: LogBatch):
                 print(Fore.RED + f"   ❌ Ollama failed: {e}", flush=True)
                 final_summary = f"AI Error: {str(e)}"
         else:
+            # FIX: Correct indentation for ELSE block
             print(Fore.YELLOW + f"   Skipping AI (Cooldown active).", flush=True)
             final_summary = "(AI Cooldown Active)"
         
