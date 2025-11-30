@@ -112,7 +112,7 @@ async def receive_log(batch: LogBatch):
             final_summary = "(AI Cooldown Active)"
         
         health_document = {
-            "timestamp": datetime.datetime.now(),
+            "timestamp": datetime.datetime.now(datetime.timezone.utc),
             "hostname": host,
             "total_risk_score": total_score,
             "health_status": health_status,

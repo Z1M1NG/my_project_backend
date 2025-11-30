@@ -3,7 +3,7 @@ import requests
 import json
 import time
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Dict, List, Any
 
 # --- CONFIGURATION (UPDATE THESE ON THE LAPTOP) ---
@@ -44,7 +44,7 @@ def collect_logs() -> List[Dict[str, Any]]:
             if results.response:
                 for row in results.response:
                     log_entry = {
-                        "timestamp": datetime.now().isoformat(),
+                        "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
                         "hostname": os.environ.get("COMPUTERNAME", "Unknown-PC"),
                         "query_name": query_name,
                         "raw_data": row
