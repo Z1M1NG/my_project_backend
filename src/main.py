@@ -90,15 +90,21 @@ async def receive_log(batch: LogBatch):
             sorted_risks = sorted(risks, key=lambda x: x['score'], reverse=True)[:5]
             
             prompt = (
-                f"Role: Security Analyst. System: '{host}' (Score: {total_score}).\n"
-                f"Detected Risks:\n{sorted_risks}\n\n"
-                f"Instructions: Analyze the logs. If blocked apps are found, list their names explicitly.\n"
-                f"Output STRICTLY in this format:\n"
-                f"**Summary:** <Description including specific process names found>\n"
-                f"**Verdict:** <Policy Violation / Malware / C2 / Persistence>\n"
-                f"**Action:**\n"
-                f"- <Specific Step 1>\n"
-                f"- <Specific Step 2>"
+                f"Role: Tier 3 Security Analyst. System: '{host}' (Score: {total_score}).\n"
+                f"Input Logs (Top Risks):\n{sorted_risks}\n\n"
+                f"Task: Generate a strict security report based ONLY on the logs provided.\n"
+                f"Rules:\n"
+                f"1. If a log says 'Blocked Application', explicitly name that application.\n"
+                f"2. If a log says 'Suspicious Outbound Connection', state the Port/IP.\n"
+                f"3. Ignore generic system processes unless they are explicitly flagged as blocked.\n\n"
+                f"Output Format:\n"
+                f"**Summary:** [One clear sentence describing the main threat. Mention the specific malware/app name if found.]\n"
+                f"**Verdict:** [Choose ONE: Critical Malware / Policy Violation / C2 Activity / False Positive]\n"
+                f"**Detected Threats:**\n"
+                f"- [Name of App/Process] : [Reason from log]\n"
+                f"**Recommended Action:**\n"
+                f"- [Specific Step 1]\n"
+                f"- [Specific Step 2]"
             )
 
             try:
