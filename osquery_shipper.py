@@ -17,7 +17,7 @@ TIMEOUT_SECONDS = 120
 # --- OSQUERY CONFIGURATION ---
 QUERIES = {
     "system_info": "SELECT hostname, computer_name, os_version, physical_memory FROM system_info;",
-    "process_events": "SELECT name, path, cmdline, pid, CAST(percent_processor_time AS TEXT) AS cpu_usage_percent, CAST(resident_size / 1024 / 1024 AS TEXT) AS memory_mb FROM processes;",
+    "process_events": "SELECT name, path, cmdline, pid, percent_processor_time AS cpu_usage_percent, resident_size / 1024 / 1024 AS memory_mb FROM processes;",
     "open_sockets": "SELECT DISTINCT socket_type, local_port, remote_address, remote_port, path FROM process_open_sockets WHERE remote_port > 0;",
     "startup_items": "SELECT name, path, status, source FROM startup_items;",
     "listening_ports": "SELECT address, port, protocol, pid FROM listening_ports WHERE address = '0.0.0.0';",

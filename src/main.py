@@ -15,7 +15,7 @@ init(autoreset=True)
 # --- CONFIGURATION ---
 AI_COOLDOWN_SECONDS = 300 
 last_ai_call = {}
-AI_MODEL_NAME = 'llama3'
+AI_MODEL_NAME = 'gemma2:2b'
 
 # --- Initialize ---
 try:
@@ -91,13 +91,14 @@ async def receive_log(batch: LogBatch):
             
             prompt = (
                 f"Role: Security Analyst. System: '{host}' (Score: {total_score}).\n"
-                f"Anomalies:\n{sorted_risks}\n\n"
-                f"Instructions: Analyze the logs and output STRICTLY in this format:\n"
-                f"**Summary:** <1 sentence description>\n"
-                f"**Verdict:** <Malware / C2 / Persistence / Unknown>\n"
+                f"Detected Risks:\n{sorted_risks}\n\n"
+                f"Instructions: Analyze the logs. If blocked apps are found, list their names explicitly.\n"
+                f"Output STRICTLY in this format:\n"
+                f"**Summary:** <Description including specific process names found>\n"
+                f"**Verdict:** <Policy Violation / Malware / C2 / Persistence>\n"
                 f"**Action:**\n"
-                f"- <Step 1>\n"
-                f"- <Step 2>"
+                f"- <Specific Step 1>\n"
+                f"- <Specific Step 2>"
             )
 
             try:
