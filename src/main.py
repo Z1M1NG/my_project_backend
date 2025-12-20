@@ -108,7 +108,7 @@ async def receive_log(batch: LogBatch):
         if (current_time - last_time) > AI_COOLDOWN_SECONDS:
             print(Fore.CYAN + f"   ⚠️ High Risk! Invoking {AI_MODEL_NAME}...", flush=True)
             
-            sorted_risks = sorted(risks, key=lambda x: x['score'], reverse=True)[:5]
+            sorted_risks = sorted(risks, key=lambda x: x['score'], reverse=True)[:15]
             
             prompt = (
                 f"Role: Tier 3 Security Analyst. System: '{host}' (Score: {total_score}).\n"
