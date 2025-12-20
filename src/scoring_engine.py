@@ -31,7 +31,8 @@ def _score_startup_items(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, st
     name = log_columns.get("name", "Unknown").lower()
     suspicious_startup = ["nc.exe", "trojan.exe", "miner.exe", "mimikatz.exe"]
     
-    # Improved: Check if suspicious name is part of the string, not just exact match
+    # Fuzzy match is acceptable for Startup Items because these specific names 
+    # (like "miner") are highly indicative of malware and rarely normal substrings.
     for susp in suspicious_startup:
         if susp in name:
              return (PERSISTENCE_SCORE, f"Suspicious Startup Item: {name}")
@@ -65,30 +66,30 @@ def _score_process_event(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, st
     except ValueError:
         return (0, "")
 
-    # 1. CHECK APP BLOCK LIST (IMPROVED: Fuzzy/Substring Match)
+    # 1. CHECK APP BLOCK LIST (STRICT MATCHING)
+    # This prevents the "Host" false positive issue.
     block_list = kwargs.get("app_block_list", [])
     for item in block_list:
         blocked_name = item.get("name", "").lower()
         if not blocked_name: continue
 
-        # MATCH LOGIC:
-        # Check if the blocked name is IN the process name (e.g., "torrent" in "utorrent.exe")
-        # Or if the process name is IN the blocked name (rare, but covers edge cases)
-        if blocked_name in proc_name or proc_name in blocked_name:
+        # STRICT MATCH: 
+        # Check 1: Exact Match (e.g., "discord.exe" == "discord.exe")
+        # Check 2: Name without extension (e.g., "discord" == "discord")
+        if blocked_name == proc_name or blocked_name == proc_name.replace(".exe", ""):
              return (KNOWN_BAD_ITEM_SCORE, f"Blocked Application Detected: '{proc_name}' (Matched: {blocked_name})")
 
     # 2. CHECK APP ALLOW LIST
     allow_list = kwargs.get("app_allow_list", [])
     for item in allow_list:
         allowed_name = item.get("name", item.get("app_name", "")).lower()
-        # Optimization: Exact match preferred for allow lists to avoid spoofing (e.g. "chrome_malware.exe")
-        # But keeping substring for usability if that's your preference.
+        # We keep "in" (substring) for Allow List to be more permissive/safe.
+        # e.g., allowing "chrome" should allow "chrome.exe"
         if allowed_name and allowed_name in proc_name:
             return (0, "") # Allowed, skip ML
 
     # 3. RUN ML ANOMALY DETECTION
-    # Heuristic: Only run ML if resource usage is significant to save compute time
-    # CPU > 5% or Mem > 50MB (Adjusted from 1/10 to reduce noise)
+    # Optimization: Only trigger ML on processes consuming significant resources
     if process_model and (cpu > 5 or mem > 50):
         try:
             features = np.array([[cpu, mem]])
@@ -100,7 +101,6 @@ def _score_process_event(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, st
             
     return (0, "")
 
-# --- NEW: Browser Extension Scoring ---
 def _score_browser_extensions(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, str]:
     """
     Checks Chrome Extensions against the Extension Blocklist.
@@ -123,12 +123,12 @@ def _score_browser_extensions(log_columns: Dict[str, Any], **kwargs) -> Tuple[in
         blocked_id = item.get("identifier", "").lower()
         blocked_name = item.get("name", "").lower()
         
-        # Check ID match (Strongest)
+        # Check ID match (Strongest/Most Reliable)
         if blocked_id and blocked_id == ext_id:
             return (KNOWN_BAD_ITEM_SCORE, f"Blocked Extension ID Detected: '{ext_name}' ({ext_id})")
         
-        # Check Name match (Fallback - Substring)
-        if blocked_name and blocked_name in ext_name:
+        # Check Name match (Strict Match to prevent false positives)
+        if blocked_name and blocked_name == ext_name:
             return (KNOWN_BAD_ITEM_SCORE, f"Blocked Extension Name Detected: '{ext_name}'")
 
     return (0, "")
@@ -147,6 +147,9 @@ def _score_open_sockets(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, str
     return (0, "")
 
 def _score_installed_apps(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, str]:
+    """
+    Scoring for apps found on disk (installed), even if not running.
+    """
     app_name = log_columns.get("name", "Unknown").lower()
     block_list = kwargs.get("app_block_list", []) 
     
@@ -154,8 +157,8 @@ def _score_installed_apps(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, s
         blocked_name = item.get("name", "").lower()
         if not blocked_name: continue
         
-        # Improved: Substring match for installed apps too
-        if blocked_name in app_name:
+        # STRICT MATCH: Ensures we don't flag "VNC Viewer" just because "Nc" (Netcat) is blocked.
+        if blocked_name == app_name:
             return (KNOWN_BAD_ITEM_SCORE, f"Prohibited Software Installed: '{app_name}'")
     return (0, "")
 
@@ -197,7 +200,7 @@ QUERY_SCORING_MAP = {
     "antivirus_status": _score_antivirus,
     "fim": _score_fim,
     
-    # Map remaining to zero
+    # Map remaining to zero (Info only)
     "os_version": _return_zero,
     "patches": _score_patches,
     "missing_patches": _score_patches,
@@ -208,7 +211,7 @@ QUERY_SCORING_MAP = {
     "logged_in_users": _return_zero,
 }
 
-# UPDATED: Accepts 4 separate lists
+# MAIN SCORING FUNCTION
 def score_logs(logs: List[Dict[str, Any]], 
                app_allow_list: List[Dict[str, str]] = None, 
                app_block_list: List[Dict[str, str]] = None,
@@ -219,12 +222,13 @@ def score_logs(logs: List[Dict[str, Any]],
     detailed_risks = []
     seen_anomalies = set() 
     
-    # Initialize defaults
+    # Initialize defaults to empty lists if None
     app_allow = app_allow_list if app_allow_list else []
     app_block = app_block_list if app_block_list else []
     ext_allow = ext_allow_list if ext_allow_list else []
     ext_block = ext_block_list if ext_block_list else []
 
+    # NO CUTOFF: Iterates through ALL logs provided
     for log in logs:
         query_name = log.get("query_name", "")
         raw_data = log.get("raw_data", {})
@@ -241,7 +245,7 @@ def score_logs(logs: List[Dict[str, Any]],
             
             if score > 0:
                 risk_key = f"{query_name}:{reason}"
-                # Prevent duplicate alerts for the same issue in the same batch
+                # Prevent duplicate alerts for the exact same issue in the same batch
                 if risk_key not in seen_anomalies:
                     total_score += score
                     detailed_risks.append({
