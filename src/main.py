@@ -39,21 +39,34 @@ except Exception as e:
 class LogBatch(BaseModel):
     data: List[Dict[str, Any]]
 
+# --- FETCH FUNCTIONS (FIXED) ---
 async def fetch_allow_list():
     try:
-        resp = await es.search(index="intel-allowlist", size=1000, query={"match_all": {}})
+        # Index for allowed Apps is 'intel-app-allowlist'
+        resp = await es.search(index="intel-app-allowlist", size=1000, query={"match_all": {}})
         return [hit['_source'] for hit in resp['hits']['hits']]
-    except Exception:
-        return []
+    except Exception: return []
 
-# --- FIX: ADDED BLOCK LIST FETCH ---
 async def fetch_block_list():
     try:
-        # Matches your Elasticvue index name
+        # Index for blocked Apps is 'intel-app-blocklist'
         resp = await es.search(index="intel-app-blocklist", size=1000, query={"match_all": {}})
         return [hit['_source'] for hit in resp['hits']['hits']]
-    except Exception:
-        return []
+    except Exception: return []
+
+async def fetch_ext_allow_list():
+    try:
+        # Index for allowed extensions is 'intel-ext-allowlist'
+        resp = await es.search(index="intel-ext-allowlist", size=1000, query={"match_all": {}})
+        return [hit['_source'] for hit in resp['hits']['hits']]
+    except Exception: return []
+
+async def fetch_ext_block_list():
+    try:
+        # Index for blocked extensions is 'intel-ext-blocklist'
+        resp = await es.search(index="intel-ext-blocklist", size=1000, query={"match_all": {}})
+        return [hit['_source'] for hit in resp['hits']['hits']]
+    except Exception: return []
 
 @app.post("/api/log")
 async def receive_log(batch: LogBatch):
@@ -62,23 +75,31 @@ async def receive_log(batch: LogBatch):
 
     host = logs[0].get("hostname", "Unknown")
     
-    # 1. Fetch Intelligence
-    allow_list = await fetch_allow_list()
-    block_list = await fetch_block_list() # <-- NEW
+    # 1. Fetch ALL Intelligence
+    app_allow = await fetch_allow_list()
+    app_block = await fetch_block_list()
+    ext_allow = await fetch_ext_allow_list()
+    ext_block = await fetch_ext_block_list()
 
-    # 2. Score Logs (Pass BLOCK LIST)
-    total_score, risks = scoring_engine.score_logs(logs, allow_list=allow_list, block_list=block_list)
+    # 2. Score Logs (Pass 4 lists)
+    total_score, risks = scoring_engine.score_logs(
+        logs, 
+        app_allow_list=app_allow, 
+        app_block_list=app_block,
+        ext_allow_list=ext_allow,
+        ext_block_list=ext_block
+    )
     health_status = scoring_engine.categorize_health(total_score)
     
     color = Fore.GREEN if health_status == "Healthy" else Fore.RED
     print(f"📥 Received {len(logs)} logs from {host} | Score: {color}{total_score} ({health_status})")
 
-    # Index raw logs asynchronously
+    # 3. Index raw logs
     for log in logs:
         log["processed_at"] = datetime.datetime.now()
         await es.index(index="osquery-logs", document=log)
 
-    # AI Analysis
+    # 4. AI Analysis
     if total_score >= 50: 
         final_summary = "No AI Analysis needed."
         current_time = time.time()
@@ -92,19 +113,18 @@ async def receive_log(batch: LogBatch):
             prompt = (
                 f"Role: Tier 3 Security Analyst. System: '{host}' (Score: {total_score}).\n"
                 f"Input Logs (Top Risks):\n{sorted_risks}\n\n"
-                f"Task: Generate a strict security report based ONLY on the logs provided.\n"
+                f"Task: Generate a strict security report based ONLY on the provided logs.\n"
                 f"Rules:\n"
-                f"1. If a log says 'Blocked Application', explicitly name that application.\n"
-                f"2. If a log says 'Suspicious Outbound Connection', state the Port/IP.\n"
-                f"3. Ignore generic system processes unless they are explicitly flagged as blocked.\n\n"
+                f"1. If a log says 'Blocked Application' or 'Blocked Extension', explicitly name it.\n"
+                f"2. Ignore generic system processes unless explicitly blocked.\n\n"
                 f"Output Format:\n"
-                f"**Summary:** [One clear sentence describing the main threat. Mention the specific malware/app name if found.]\n"
-                f"**Verdict:** [Choose ONE: Critical Malware / Policy Violation / C2 Activity / False Positive]\n"
+                f"**Summary:** <One clear sentence describing the main threat>\n"
+                f"**Verdict:** <Critical Malware / Policy Violation / C2 Activity>\n"
                 f"**Detected Threats:**\n"
-                f"- [Name of App/Process] : [Reason from log]\n"
-                f"**Recommended Action:**\n"
-                f"- [Specific Step 1]\n"
-                f"- [Specific Step 2]"
+                f"- <Name> : <Reason>\n"
+                f"**Action:**\n"
+                f"- <Specific Step 1>\n"
+                f"- <Specific Step 2>"
             )
 
             try:
@@ -112,7 +132,7 @@ async def receive_log(batch: LogBatch):
                     return ollama.chat(
                         model=AI_MODEL_NAME, 
                         messages=[{'role': 'user', 'content': prompt}],
-                        options={'num_predict': 120} 
+                        options={'num_predict': 500} # Increased limit
                     )
                 
                 response = await asyncio.to_thread(run_ollama)
@@ -124,7 +144,6 @@ async def receive_log(batch: LogBatch):
                 print(Fore.RED + f"   ❌ Ollama failed: {e}", flush=True)
                 final_summary = f"AI Error: {str(e)}"
         else:
-            # FIX: Correct indentation for ELSE block
             print(Fore.YELLOW + f"   Skipping AI (Cooldown active).", flush=True)
             final_summary = "(AI Cooldown Active)"
         
