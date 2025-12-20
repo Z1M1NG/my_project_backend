@@ -25,13 +25,11 @@ OLD_OS_SCORE = 30
 # --- 4. SCORING FUNCTIONS ---
 
 def _score_patches(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, str]:
-    # Returns 0 as these are installed patches, not missing ones.
     return (0, "") 
 
 def _score_startup_items(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, str]:
     name = log_columns.get("name", "Unknown").lower()
     suspicious_startup = ["nc.exe", "trojan.exe", "miner.exe", "mimikatz.exe"]
-    
     for susp in suspicious_startup:
         if susp in name:
              return (PERSISTENCE_SCORE, f"Suspicious Startup Item: {name}")
@@ -65,15 +63,25 @@ def _score_process_event(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, st
     except ValueError:
         return (0, "")
 
-    # 1. CHECK APP BLOCK LIST (STRICT MATCHING FOR PROCESSES)
-    # Processes are filenames (e.g. "discord.exe"), so strict match is best/safest.
+    # 1. CHECK APP BLOCK LIST (UPDATED: SMART REGEX MATCHING)
     block_list = kwargs.get("app_block_list", [])
     for item in block_list:
         blocked_name = item.get("name", "").lower()
         if not blocked_name: continue
 
+        # Check 1: Strict Match (Fastest)
         if blocked_name == proc_name or blocked_name == proc_name.replace(".exe", ""):
              return (KNOWN_BAD_ITEM_SCORE, f"Blocked Application Detected: '{proc_name}' (Matched: {blocked_name})")
+        
+        # Check 2: Word Boundary Regex (Robust)
+        # Matches "WhatsApp" in "WhatsAppDesktop.exe" or "WhatsApp.exe"
+        # Safely ignores "Host" in "svchost.exe"
+        try:
+            pattern = rf"\b{re.escape(blocked_name)}\b"
+            if re.search(pattern, proc_name):
+                 return (KNOWN_BAD_ITEM_SCORE, f"Blocked Application Detected: '{proc_name}' (Matched: {blocked_name})")
+        except Exception:
+            pass
 
     # 2. CHECK APP ALLOW LIST
     allow_list = kwargs.get("app_allow_list", [])
@@ -131,10 +139,6 @@ def _score_open_sockets(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, str
     return (0, "")
 
 def _score_installed_apps(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, str]:
-    """
-    Scoring for apps found on disk (installed).
-    Uses 'Word Boundary' matching to catch 'Spotify AB' without flagging 'Adobe Illustrator'.
-    """
     app_name = log_columns.get("name", "Unknown").lower()
     block_list = kwargs.get("app_block_list", []) 
     
@@ -142,15 +146,10 @@ def _score_installed_apps(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, s
         blocked_name = item.get("name", "").lower()
         if not blocked_name: continue
         
-        # SMART MATCHING LOGIC:
-        # 1. Exact Match (e.g., "spotify")
         if blocked_name == app_name:
             return (KNOWN_BAD_ITEM_SCORE, f"Prohibited Software Installed: '{app_name}'")
             
-        # 2. Regex Word Boundary (e.g., matches "spotify" in "spotify ab")
-        #    This fails safely for "tor" in "illustrator" (no boundary there)
         try:
-            # Escape the blocked name to handle special chars like C++
             pattern = rf"\b{re.escape(blocked_name)}\b"
             if re.search(pattern, app_name):
                 return (KNOWN_BAD_ITEM_SCORE, f"Prohibited Software Installed: '{app_name}' (Matched: {blocked_name})")
@@ -180,7 +179,6 @@ def _score_fim(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, str]:
          return (FIM_CHANGE_SCORE, f"File Modification Detected in Sensitive Area: {path}")
     return (FIM_CHANGE_SCORE, "File Modification Detected")
 
-
 # --- 5. ROUTING ---
 QUERY_SCORING_MAP = {
     "process_events": _score_process_event,
@@ -196,7 +194,7 @@ QUERY_SCORING_MAP = {
     "antivirus_status": _score_antivirus,
     "fim": _score_fim,
     
-    # Map remaining to zero (Info only)
+    # Map remaining to zero
     "os_version": _return_zero,
     "patches": _score_patches,
     "missing_patches": _score_patches,
@@ -218,7 +216,6 @@ def score_logs(logs: List[Dict[str, Any]],
     detailed_risks = []
     seen_anomalies = set() 
     
-    # Initialize defaults
     app_allow = app_allow_list if app_allow_list else []
     app_block = app_block_list if app_block_list else []
     ext_allow = ext_allow_list if ext_allow_list else []
@@ -231,7 +228,6 @@ def score_logs(logs: List[Dict[str, Any]],
         if query_name in QUERY_SCORING_MAP:
             score_func = QUERY_SCORING_MAP[query_name]
             
-            # Pass ALL lists to the function via kwargs
             score, reason = score_func(raw_data, 
                                      app_allow_list=app_allow, 
                                      app_block_list=app_block,
