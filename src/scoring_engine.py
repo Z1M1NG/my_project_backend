@@ -1,5 +1,6 @@
 import joblib
 import numpy as np
+import re
 from typing import Dict, Any, Tuple, List
 
 # --- 1. LOAD ML MODEL ---
@@ -31,8 +32,6 @@ def _score_startup_items(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, st
     name = log_columns.get("name", "Unknown").lower()
     suspicious_startup = ["nc.exe", "trojan.exe", "miner.exe", "mimikatz.exe"]
     
-    # Fuzzy match is acceptable for Startup Items because these specific names 
-    # (like "miner") are highly indicative of malware and rarely normal substrings.
     for susp in suspicious_startup:
         if susp in name:
              return (PERSISTENCE_SCORE, f"Suspicious Startup Item: {name}")
@@ -66,16 +65,13 @@ def _score_process_event(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, st
     except ValueError:
         return (0, "")
 
-    # 1. CHECK APP BLOCK LIST (STRICT MATCHING)
-    # This prevents the "Host" false positive issue.
+    # 1. CHECK APP BLOCK LIST (STRICT MATCHING FOR PROCESSES)
+    # Processes are filenames (e.g. "discord.exe"), so strict match is best/safest.
     block_list = kwargs.get("app_block_list", [])
     for item in block_list:
         blocked_name = item.get("name", "").lower()
         if not blocked_name: continue
 
-        # STRICT MATCH: 
-        # Check 1: Exact Match (e.g., "discord.exe" == "discord.exe")
-        # Check 2: Name without extension (e.g., "discord" == "discord")
         if blocked_name == proc_name or blocked_name == proc_name.replace(".exe", ""):
              return (KNOWN_BAD_ITEM_SCORE, f"Blocked Application Detected: '{proc_name}' (Matched: {blocked_name})")
 
@@ -83,13 +79,10 @@ def _score_process_event(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, st
     allow_list = kwargs.get("app_allow_list", [])
     for item in allow_list:
         allowed_name = item.get("name", item.get("app_name", "")).lower()
-        # We keep "in" (substring) for Allow List to be more permissive/safe.
-        # e.g., allowing "chrome" should allow "chrome.exe"
         if allowed_name and allowed_name in proc_name:
-            return (0, "") # Allowed, skip ML
+            return (0, "") 
 
     # 3. RUN ML ANOMALY DETECTION
-    # Optimization: Only trigger ML on processes consuming significant resources
     if process_model and (cpu > 5 or mem > 50):
         try:
             features = np.array([[cpu, mem]])
@@ -102,32 +95,24 @@ def _score_process_event(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, st
     return (0, "")
 
 def _score_browser_extensions(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, str]:
-    """
-    Checks Chrome Extensions against the Extension Blocklist.
-    """
     ext_name = log_columns.get("name", "Unknown").lower()
     ext_id = log_columns.get("identifier", "").lower()
     
-    # Fetch Extension Lists from kwargs
     block_list = kwargs.get("ext_block_list", [])
     allow_list = kwargs.get("ext_allow_list", [])
 
-    # 1. Check Allow List (Pass if found)
     for item in allow_list:
         allowed_id = item.get("identifier", "").lower()
         if allowed_id and allowed_id == ext_id:
             return (0, "")
 
-    # 2. Check Block List (Flag if found)
     for item in block_list:
         blocked_id = item.get("identifier", "").lower()
         blocked_name = item.get("name", "").lower()
         
-        # Check ID match (Strongest/Most Reliable)
         if blocked_id and blocked_id == ext_id:
             return (KNOWN_BAD_ITEM_SCORE, f"Blocked Extension ID Detected: '{ext_name}' ({ext_id})")
         
-        # Check Name match (Strict Match to prevent false positives)
         if blocked_name and blocked_name == ext_name:
             return (KNOWN_BAD_ITEM_SCORE, f"Blocked Extension Name Detected: '{ext_name}'")
 
@@ -140,7 +125,6 @@ def _score_open_sockets(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, str
     except:
         r_port = 0
         
-    # Expanded Suspicious Ports
     suspicious_ports = [4444, 6667, 1337, 31337, 23, 2323, 445] 
     if r_port in suspicious_ports:
         return (MALICIOUS_C2_SCORE, f"Suspicious Outbound Connection to Port {r_port}")
@@ -148,7 +132,8 @@ def _score_open_sockets(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, str
 
 def _score_installed_apps(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, str]:
     """
-    Scoring for apps found on disk (installed), even if not running.
+    Scoring for apps found on disk (installed).
+    Uses 'Word Boundary' matching to catch 'Spotify AB' without flagging 'Adobe Illustrator'.
     """
     app_name = log_columns.get("name", "Unknown").lower()
     block_list = kwargs.get("app_block_list", []) 
@@ -157,9 +142,21 @@ def _score_installed_apps(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, s
         blocked_name = item.get("name", "").lower()
         if not blocked_name: continue
         
-        # STRICT MATCH: Ensures we don't flag "VNC Viewer" just because "Nc" (Netcat) is blocked.
+        # SMART MATCHING LOGIC:
+        # 1. Exact Match (e.g., "spotify")
         if blocked_name == app_name:
             return (KNOWN_BAD_ITEM_SCORE, f"Prohibited Software Installed: '{app_name}'")
+            
+        # 2. Regex Word Boundary (e.g., matches "spotify" in "spotify ab")
+        #    This fails safely for "tor" in "illustrator" (no boundary there)
+        try:
+            # Escape the blocked name to handle special chars like C++
+            pattern = rf"\b{re.escape(blocked_name)}\b"
+            if re.search(pattern, app_name):
+                return (KNOWN_BAD_ITEM_SCORE, f"Prohibited Software Installed: '{app_name}' (Matched: {blocked_name})")
+        except Exception:
+            pass
+            
     return (0, "")
 
 def _return_zero(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, str]:
@@ -178,7 +175,6 @@ def _score_antivirus(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, str]:
     return (0, "")
 
 def _score_fim(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, str]:
-    # Basic check - in production you'd want to ignore known safe paths
     path = log_columns.get("target_path", "")
     if "Temp" in path or "AppData" in path:
          return (FIM_CHANGE_SCORE, f"File Modification Detected in Sensitive Area: {path}")
@@ -222,13 +218,12 @@ def score_logs(logs: List[Dict[str, Any]],
     detailed_risks = []
     seen_anomalies = set() 
     
-    # Initialize defaults to empty lists if None
+    # Initialize defaults
     app_allow = app_allow_list if app_allow_list else []
     app_block = app_block_list if app_block_list else []
     ext_allow = ext_allow_list if ext_allow_list else []
     ext_block = ext_block_list if ext_block_list else []
 
-    # NO CUTOFF: Iterates through ALL logs provided
     for log in logs:
         query_name = log.get("query_name", "")
         raw_data = log.get("raw_data", {})
@@ -245,7 +240,6 @@ def score_logs(logs: List[Dict[str, Any]],
             
             if score > 0:
                 risk_key = f"{query_name}:{reason}"
-                # Prevent duplicate alerts for the exact same issue in the same batch
                 if risk_key not in seen_anomalies:
                     total_score += score
                     detailed_risks.append({
