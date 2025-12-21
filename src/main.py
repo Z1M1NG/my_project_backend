@@ -89,6 +89,18 @@ async def submit_logs(batch: LogBatch, request: Request):
     ext_allow = await fetch_ext_allow_list()
     ext_block = await fetch_ext_block_list()
 
+    try:
+        for log in batch.data:
+            # Add metadata to the raw log
+            log["processed_at"] = datetime.datetime.now(datetime.timezone.utc)
+            log["client_ip"] = client_ip # Optional: Add IP to raw logs too
+            
+            # Index to 'osquery-logs'
+            await es.index(index="osquery-logs", document=log)
+        # print(Fore.WHITE + f"   Indexed {len(batch.data)} raw logs.") # Optional: Un-comment for verbose logging
+    except Exception as e:
+        print(Fore.RED + f"   ❌ Raw Log Indexing Failed: {e}")
+
     # 4. Score Logs (Pass 4 lists)
     total_score, risks = scoring_engine.score_logs(
         batch.data, 
@@ -150,19 +162,19 @@ async def submit_logs(batch: LogBatch, request: Request):
             print(Fore.YELLOW + f"   Skipping AI (Cooldown active).", flush=True)
             final_summary = "(AI Cooldown Active)"
         
-    health_document = {
-        "timestamp": datetime.datetime.now(datetime.timezone.utc),
-        "hostname": host,
-        "ip_address": client_ip, 
-        "total_risk_score": total_score,
-        "health_status": health_status,
-        "ai_summary": final_summary,
-        "top_risks": risks[:10]
-    }
-    try:
-        await es.index(index="host-health-status", document=health_document)
-        print(Fore.WHITE + f"   ✅ Indexed health status") 
-    except Exception as e:
-        print(Fore.RED + f"   ❌ ES Index Failed: {e}")
+        health_document = {
+            "timestamp": datetime.datetime.now(datetime.timezone.utc),
+            "hostname": host,
+            "ip_address": client_ip,
+            "total_risk_score": total_score,
+            "health_status": health_status,
+            "ai_summary": final_summary,
+            "top_risks": risks[:10]
+        }
+        try:
+            await es.index(index="host-health-status", document=health_document)
+            print(Fore.WHITE + f"   ✅ Indexed health status") # Optional: Reduced noise since we have the main print above
+        except Exception as e:
+            print(Fore.RED + f"   ❌ ES Index Failed: {e}")
 
-    return {"status": "processed", "score": total_score}
+        return {"status": "processed", "score": total_score}
