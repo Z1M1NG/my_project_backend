@@ -4,7 +4,7 @@ import time
 import asyncio
 import ollama
 import scoring_engine
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 from typing import List, Dict, Any
 from elasticsearch import AsyncElasticsearch
@@ -39,7 +39,7 @@ except Exception as e:
 class LogBatch(BaseModel):
     data: List[Dict[str, Any]]
 
-# --- FETCH FUNCTIONS (FIXED) ---
+# --- FETCH FUNCTIONS ---
 async def fetch_allow_list():
     try:
         # Index for allowed Apps is 'intel-app-allowlist'
@@ -68,20 +68,28 @@ async def fetch_ext_block_list():
         return [hit['_source'] for hit in resp['hits']['hits']]
     except Exception: return []
 
-@app.post("/api/log")
-async def receive_log(batch: LogBatch):
-    logs = batch.data
-    if not logs: return {"status": "empty"}
-
-    host = logs[0].get("hostname", "Unknown")
+@app.post("/submit_logs")
+async def submit_logs(batch: LogBatch, request: Request):
+    start_time = time.time()
     
-    # 1. Fetch ALL Intelligence
+    # 1. Capture Client IP (Tailscale IP)
+    client_ip = request.client.host
+    
+    # 2. Extract Hostname (Assume from first log or default)
+    host = "Unknown-Host"
+    if batch.data:
+        # Try to find a log with 'host_identifier' or use the first one
+        host = batch.data[0].get("host_identifier", batch.data[0].get("hostname", "Unknown-Host"))
+
+    print(Fore.CYAN + f"[{datetime.datetime.now().strftime('%H:%M:%S')}] Received {len(batch.data)} logs from {host} ({client_ip})")
+    
+    # 3. Fetch ALL Intelligence
     app_allow = await fetch_allow_list()
     app_block = await fetch_block_list()
     ext_allow = await fetch_ext_allow_list()
     ext_block = await fetch_ext_block_list()
 
-    # 2. Score Logs (Pass 4 lists)
+    # 4. Score Logs (Pass 4 lists)
     total_score, risks = scoring_engine.score_logs(
         logs, 
         app_allow_list=app_allow, 
@@ -107,7 +115,7 @@ async def receive_log(batch: LogBatch):
         
         if (current_time - last_time) > AI_COOLDOWN_SECONDS:
             print(Fore.CYAN + f"   ⚠️ High Risk! Invoking {AI_MODEL_NAME}...", flush=True)
-            
+    
             sorted_risks = sorted(risks, key=lambda x: x['score'], reverse=True)[:25]
             
             prompt = (
@@ -132,7 +140,7 @@ async def receive_log(batch: LogBatch):
                     return ollama.chat(
                         model=AI_MODEL_NAME, 
                         messages=[{'role': 'user', 'content': prompt}],
-                        options={'num_predict': 500} # Increased limit
+                        options={'num_predict': 550} # Increased limit
                     )
                 
                 response = await asyncio.to_thread(run_ollama)
@@ -150,6 +158,7 @@ async def receive_log(batch: LogBatch):
         health_document = {
             "timestamp": datetime.datetime.now(datetime.timezone.utc),
             "hostname": host,
+            "ip_address": client_ip,
             "total_risk_score": total_score,
             "health_status": health_status,
             "ai_summary": final_summary,
