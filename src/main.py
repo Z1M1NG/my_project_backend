@@ -161,7 +161,8 @@ async def submit_logs(batch: LogBatch, request: Request):
         }
         try:
             await es.index(index="host-health-status", document=health_document)
+            print(Fore.WHITE + f"   ✅ Indexed health status") # Optional: Reduced noise since we have the main print above
         except Exception as e:
             print(Fore.RED + f"   ❌ ES Index Failed: {e}")
 
-    return {"status": "processed", "score": total_score}
+        return {"status": "processed", "score": total_score}
