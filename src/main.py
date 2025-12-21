@@ -89,18 +89,6 @@ async def submit_logs(batch: LogBatch, request: Request):
     ext_allow = await fetch_ext_allow_list()
     ext_block = await fetch_ext_block_list()
 
-    try:
-        for log in batch.data:
-            # Add metadata to the raw log
-            log["processed_at"] = datetime.datetime.now(datetime.timezone.utc)
-            log["client_ip"] = client_ip # Optional: Add IP to raw logs too
-            
-            # Index to 'osquery-logs'
-            await es.index(index="osquery-logs", document=log)
-        # print(Fore.WHITE + f"   Indexed {len(batch.data)} raw logs.") # Optional: Un-comment for verbose logging
-    except Exception as e:
-        print(Fore.RED + f"   ❌ Raw Log Indexing Failed: {e}")
-
     # 4. Score Logs (Pass 4 lists)
     total_score, risks = scoring_engine.score_logs(
         batch.data, 
@@ -115,8 +103,9 @@ async def submit_logs(batch: LogBatch, request: Request):
     print(f"📥 Received {len(batch.data)} logs from {host} | Score: {color}{total_score} ({health_status})")
 
     # 4. AI Analysis
+    final_summary = "No significant threats detected."
+
     if total_score >= 50: 
-        final_summary = "No significant threats detected."
         current_time = time.time()
         last_time = last_ai_call.get(host, 0)
         
@@ -177,4 +166,4 @@ async def submit_logs(batch: LogBatch, request: Request):
         except Exception as e:
             print(Fore.RED + f"   ❌ ES Index Failed: {e}")
 
-        return {"status": "processed", "score": total_score}
+    return {"status": "processed", "score": total_score}
