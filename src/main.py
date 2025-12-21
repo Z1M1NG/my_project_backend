@@ -91,7 +91,7 @@ async def submit_logs(batch: LogBatch, request: Request):
 
     # 4. Score Logs (Pass 4 lists)
     total_score, risks = scoring_engine.score_logs(
-        logs, 
+        batch.data, 
         app_allow_list=app_allow, 
         app_block_list=app_block,
         ext_allow_list=ext_allow,
@@ -100,16 +100,11 @@ async def submit_logs(batch: LogBatch, request: Request):
     health_status = scoring_engine.categorize_health(total_score)
     
     color = Fore.GREEN if health_status == "Healthy" else Fore.RED
-    print(f"📥 Received {len(logs)} logs from {host} | Score: {color}{total_score} ({health_status})")
-
-    # 3. Index raw logs
-    for log in logs:
-        log["processed_at"] = datetime.datetime.now()
-        await es.index(index="osquery-logs", document=log)
+    print(f"📥 Received {len(batch.data)} logs from {host} | Score: {color}{total_score} ({health_status})")
 
     # 4. AI Analysis
     if total_score >= 50: 
-        final_summary = "No AI Analysis needed."
+        final_summary = "No significant threats detected."
         current_time = time.time()
         last_time = last_ai_call.get(host, 0)
         
