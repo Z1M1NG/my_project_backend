@@ -150,19 +150,19 @@ async def submit_logs(batch: LogBatch, request: Request):
             print(Fore.YELLOW + f"   Skipping AI (Cooldown active).", flush=True)
             final_summary = "(AI Cooldown Active)"
         
-        health_document = {
-            "timestamp": datetime.datetime.now(datetime.timezone.utc),
-            "hostname": host,
-            "ip_address": client_ip,
-            "total_risk_score": total_score,
-            "health_status": health_status,
-            "ai_summary": final_summary,
-            "top_risks": risks[:10]
-        }
-        try:
-            await es.index(index="host-health-status", document=health_document)
-            print(Fore.WHITE + f"   ✅ Indexed health status") # Optional: Reduced noise since we have the main print above
-        except Exception as e:
-            print(Fore.RED + f"   ❌ ES Index Failed: {e}")
+    health_document = {
+        "timestamp": datetime.datetime.now(datetime.timezone.utc),
+        "hostname": host,
+        "ip_address": client_ip, 
+        "total_risk_score": total_score,
+        "health_status": health_status,
+        "ai_summary": final_summary,
+        "top_risks": risks[:10]
+    }
+    try:
+        await es.index(index="host-health-status", document=health_document)
+        print(Fore.WHITE + f"   ✅ Indexed health status") 
+    except Exception as e:
+        print(Fore.RED + f"   ❌ ES Index Failed: {e}")
 
-        return {"status": "processed", "score": total_score}
+    return {"status": "processed", "score": total_score}
