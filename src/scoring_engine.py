@@ -46,50 +46,39 @@ def _is_match(value: str, pattern_list: List[Any]) -> bool:
 def _score_process_anomaly(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, str]:
     """
     Uses Isolation Forest to detect High CPU / Low RAM anomalies.
-    Includes comprehensive filtering for Windows system noise.
+    USES PATH-BASED FILTERING to ignore system noise.
     """
     if process_model is None:
         return (0, "")
     
     name = log_columns.get("name", "").lower()
+    path = log_columns.get("path", "").lower()
     cmdline = log_columns.get("cmdline", "").lower()
     
-    # --- NOISE FILTER: Ignore Agent and known System Processes ---
-    
-    # 1. Ignore the Agent itself
+    # --- NOISE FILTER 1: Ignore the Agent itself ---
     if "osquery_shipper" in cmdline:
         return (0, "")
         
-    # 2. Comprehensive Safe List for Windows Background Services
-    # These processes accumulate high CPU "ticks" over time but use low RAM.
-    # We ignore them to prevent false positives caused by the clamping logic.
-    safe_system_procs = [
-        # Core System
-        "svchost.exe", "system", "registry", "smss.exe", "csrss.exe", 
-        "wininit.exe", "services.exe", "lsass.exe", "lsaiso.exe",
-        "winlogon.exe", "fontdrvhost.exe", "dwm.exe", "spoolsv.exe",
-        "ntoskrnl.exe", "werfault.exe", "wermgr.exe",
-        
-        # Windows UI & Shell
-        "explorer.exe", "taskmgr.exe", "sihost.exe", "taskhostw.exe",
-        "shellexperiencehost.exe", "startmenuexperiencehost.exe",
-        "searchindexer.exe", "ctfmon.exe", "conhost.exe", "runtimebroker.exe",
-        "applicationframehost.exe", "lockapp.exe",
-        
-        # Windows Components
-        "msmpeng.exe", "nissrv.exe", "audiodg.exe", "wlanext.exe",
-        "wmiprvse.exe", "wmiadap.exe", "dashost.exe", "dllhost.exe",
-        "smartscreen.exe", "securityhealthservice.exe", "sgrmbroker.exe",
-        "useroobebroker.exe", "backgroundtaskhost.exe", "aggregatorhost.exe",
-        "tiworker.exe", "trustedinstaller.exe", "mousoercoreworker.exe"
-    ]
+    # --- NOISE FILTER 2: PATH-BASED WHITELISTING (The Scalable Fix) ---
+    # Instead of listing 100 names, we ignore trusted directories.
     
-    if name in safe_system_procs:
+    # 1. Ignore empty paths (Kernel processes like System, Registry usually have no path)
+    if not path:
         return (0, "")
 
+    # 2. Ignore Windows System binaries
+    if path.startswith("c:\\windows\\"):
+        return (0, "")
+        
+    # 3. Ignore installed Program Files (Optional: keep if you trust installed apps)
+    # This prevents False Positives from heavy apps like Photoshop or IDEs
+    if path.startswith("c:\\program files"):
+        return (0, "")
+
+    # --- ANOMALY CHECK (Only runs on User Space processes) ---
     try:
         # --- CPU CLAMPING LOGIC ---
-        # Windows OSQuery often returns accumulated ticks (e.g., 2000000).
+        # Windows OSQuery often returns accumulated ticks.
         # We clamp this to 100.0 to match the ML model's 0-100 training range.
         raw_cpu = float(log_columns.get("cpu_usage_percent", 0))
         cpu = 100.0 if raw_cpu > 100 else raw_cpu
