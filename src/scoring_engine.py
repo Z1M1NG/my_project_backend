@@ -1,7 +1,7 @@
 import joblib
 import numpy as np
 import re
-from typing import Dict, Any, Tuple, List
+from typing import Dict, Any, Tuple, List, Set
 
 # --- 1. LOAD ML MODEL ---
 try:
@@ -12,210 +12,145 @@ except FileNotFoundError:
     process_model = None
 
 # --- 2. DEFINE SCORING RULES ---
-PATCH_SCORE = 10         
+PATCH_SCORE = 10
 FIREWALL_OFF_SCORE = 50
 ANTIVIRUS_OFF_SCORE = 50
-MALICIOUS_C2_SCORE = 80      
-PERSISTENCE_SCORE = 40       
-PROCESS_ANOMALY_SCORE = 60  
+MALICIOUS_C2_SCORE = 80
+PERSISTENCE_SCORE = 40
+PROCESS_ANOMALY_SCORE = 60  # <--- CRITICAL: Updated to 60 to trigger AI
 FIM_CHANGE_SCORE = 60
 KNOWN_BAD_ITEM_SCORE = 100
 OLD_OS_SCORE = 30
 
+# --- 3. HELPER FUNCTIONS ---
+def _is_match(value: str, pattern_list: List[str]) -> bool:
+    val = value.lower()
+    for pattern in pattern_list:
+        if pattern.lower() in val:
+            return True
+    return False
+
 # --- 4. SCORING FUNCTIONS ---
 
+def _score_process_anomaly(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, str]:
+    """
+    Uses Isolation Forest to detect High CPU / Low RAM anomalies.
+    Includes filtering for noise and clamping for raw CPU values.
+    """
+    if process_model is None:
+        return (0, "")
+    
+    name = log_columns.get("name", "").lower()
+    cmdline = log_columns.get("cmdline", "").lower()
+    
+    # --- NOISE FILTER: Ignore Agent and System Processes ---
+    # Prevents self-flagging or flagging Windows services that accumulate high CPU time
+    if "osquery_shipper" in cmdline:
+        return (0, "")
+        
+    safe_system_procs = ["svchost.exe", "system", "registry", "smss.exe", "csrss.exe", 
+                         "wininit.exe", "services.exe", "lsass.exe", "msmpeng.exe", 
+                         "explorer.exe", "taskmgr.exe", "audiodg.exe"]
+    if name in safe_system_procs:
+        return (0, "")
+
+    try:
+        # --- CPU CLAMPING LOGIC ---
+        # Windows OSQuery often returns accumulated ticks (e.g., 2000000).
+        # We clamp this to 100.0 to match the ML model's 0-100 training range.
+        raw_cpu = float(log_columns.get("cpu_usage_percent", 0))
+        cpu = 100.0 if raw_cpu > 100 else raw_cpu
+        
+        mem = float(log_columns.get("memory_mb", 0))
+        
+        # Predict: [[cpu, mem]]
+        prediction = process_model.predict([[cpu, mem]])[0]
+        
+        if prediction == -1: # Anomaly
+            return (PROCESS_ANOMALY_SCORE, f"Anomalous Behavior Detected (CPU: {cpu:.1f}%, Mem: {mem:.1f}MB)")
+            
+    except Exception as e:
+        # Fail safe to 0 if data is malformed
+        return (0, "")
+        
+    return (0, "")
+
+def _score_programs(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, str]:
+    name = log_columns.get("name", "")
+    app_block = kwargs.get("app_block_list", [])
+    app_allow = kwargs.get("app_allow_list", [])
+    
+    # 1. Check Allowlist (Explicitly Safe)
+    if _is_match(name, app_allow):
+        return (0, "")
+        
+    # 2. Check Blocklist (Explicitly Bad)
+    if _is_match(name, app_block):
+        return (KNOWN_BAD_ITEM_SCORE, f"Policy Violation: {name}")
+        
+    return (0, "")
+
+def _score_open_sockets(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, str]:
+    remote_port = log_columns.get("remote_port", 0)
+    # Heuristic: Common C2 ports
+    if str(remote_port) in ["4444", "1337", "6667"]:
+        return (MALICIOUS_C2_SCORE, f"Suspicious C2 Connection (Port {remote_port})")
+    return (0, "")
+
 def _score_patches(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, str]:
+    # Placeholder for patch logic
     return (0, "") 
 
 def _score_startup_items(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, str]:
     name = log_columns.get("name", "Unknown").lower()
     suspicious_startup = ["nc.exe", "trojan.exe", "miner.exe", "mimikatz.exe"]
-    for susp in suspicious_startup:
-        if susp in name:
-             return (PERSISTENCE_SCORE, f"Suspicious Startup Item: {name}")
+    if name in suspicious_startup:
+        return (PERSISTENCE_SCORE, f"Suspicious Startup Item: {name}")
     return (0, "")
 
-def _score_system_info(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, str]:
-    build_str = log_columns.get("build", "0")
-    MIN_SAFE_BUILD = 19044 
-    try:
-        if "." in build_str:
-            parts = build_str.split(".")
-            if len(parts) >= 3: current_build = int(parts[2])
-            else: current_build = int(parts[-1])
-        else:
-            current_build = int(build_str)
-
-        if current_build < MIN_SAFE_BUILD:
-             return (OLD_OS_SCORE, f"Critical Security Risk: OS Build {current_build} is outdated.")
-    except Exception:
-        pass
-    return (0, "")
-
-def _score_process_event(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, str]:
-    proc_name = log_columns.get("name", "unknown").lower()
-    cpu_str = log_columns.get("cpu_usage_percent", "0")
-    mem_str = log_columns.get("memory_mb", "0")
-    
-    try:
-        cpu = float(cpu_str) if cpu_str else 0.0
-        mem = float(mem_str) if mem_str else 0.0
-    except ValueError:
-        return (0, "")
-
-    # 1. CHECK APP BLOCK LIST (UPDATED: SMART REGEX MATCHING)
-    block_list = kwargs.get("app_block_list", [])
-    for item in block_list:
-        blocked_name = item.get("name", "").lower()
-        if not blocked_name: continue
-
-        # Check 1: Strict Match (Fastest)
-        if blocked_name == proc_name or blocked_name == proc_name.replace(".exe", ""):
-             return (KNOWN_BAD_ITEM_SCORE, f"Blocked Application Detected: '{proc_name}' (Matched: {blocked_name})")
-        
-        # Check 2: Word Boundary Regex (Robust)
-        # Matches "WhatsApp" in "WhatsAppDesktop.exe" or "WhatsApp.exe"
-        # Safely ignores "Host" in "svchost.exe"
-        try:
-            pattern = rf"\b{re.escape(blocked_name)}\b"
-            if re.search(pattern, proc_name):
-                 return (KNOWN_BAD_ITEM_SCORE, f"Blocked Application Detected: '{proc_name}' (Matched: {blocked_name})")
-        except Exception:
-            pass
-
-    # 2. CHECK APP ALLOW LIST
-    allow_list = kwargs.get("app_allow_list", [])
-    for item in allow_list:
-        allowed_name = item.get("name", item.get("app_name", "")).lower()
-        if allowed_name and allowed_name in proc_name:
-            return (0, "") 
-
-    # 3. RUN ML ANOMALY DETECTION
-    if process_model and (cpu > 5 or mem > 50):
-        try:
-            features = np.array([[cpu, mem]])
-            prediction = process_model.predict(features)[0]
-            if prediction == -1:
-                return (PROCESS_ANOMALY_SCORE, f"ML Anomaly: High Load ({cpu}% CPU, {mem}MB) in '{proc_name}'")
-        except Exception as e:
-            print(f"ML Error: {e}")
-            
-    return (0, "")
-
-def _score_browser_extensions(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, str]:
-    ext_name = log_columns.get("name", "Unknown").lower()
-    ext_id = log_columns.get("identifier", "").lower()
-    
-    block_list = kwargs.get("ext_block_list", [])
-    allow_list = kwargs.get("ext_allow_list", [])
-
-    for item in allow_list:
-        allowed_id = item.get("identifier", "").lower()
-        if allowed_id and allowed_id == ext_id:
-            return (0, "")
-
-    for item in block_list:
-        blocked_id = item.get("identifier", "").lower()
-        blocked_name = item.get("name", "").lower()
-        
-        if blocked_id and blocked_id == ext_id:
-            return (KNOWN_BAD_ITEM_SCORE, f"Blocked Extension ID Detected: '{ext_name}' ({ext_id})")
-        
-        if blocked_name and blocked_name == ext_name:
-            return (KNOWN_BAD_ITEM_SCORE, f"Blocked Extension Name Detected: '{ext_name}'")
-
-    return (0, "")
-
-def _score_open_sockets(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, str]:
-    remote_port = log_columns.get("remote_port", "0")
-    try:
-        r_port = int(remote_port)
-    except:
-        r_port = 0
-        
-    suspicious_ports = [4444, 6667, 1337, 31337, 23, 2323, 445] 
-    if r_port in suspicious_ports:
-        return (MALICIOUS_C2_SCORE, f"Suspicious Outbound Connection to Port {r_port}")
-    return (0, "")
-
-def _score_installed_apps(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, str]:
-    app_name = log_columns.get("name", "Unknown").lower()
-    block_list = kwargs.get("app_block_list", []) 
-    
-    for item in block_list:
-        blocked_name = item.get("name", "").lower()
-        if not blocked_name: continue
-        
-        if blocked_name == app_name:
-            return (KNOWN_BAD_ITEM_SCORE, f"Prohibited Software Installed: '{app_name}'")
-            
-        try:
-            pattern = rf"\b{re.escape(blocked_name)}\b"
-            if re.search(pattern, app_name):
-                return (KNOWN_BAD_ITEM_SCORE, f"Prohibited Software Installed: '{app_name}' (Matched: {blocked_name})")
-        except Exception:
-            pass
-            
-    return (0, "")
-
-def _return_zero(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, str]:
-    return (0, "")
-
-def _score_firewall(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, str]:
-    status = log_columns.get("status", "").lower()
-    if status == "stopped":
-        return (FIREWALL_OFF_SCORE, "Windows Firewall is Disabled")
+def _score_listening_ports(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, str]:
+    port = log_columns.get("port", 0)
+    # Simple check for risky open ports
+    if str(port) in ["23", "21", "3389"]: 
+        return (10, f"Risky Open Port: {port}")
     return (0, "")
 
 def _score_antivirus(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, str]:
-    status = log_columns.get("status", "").lower()
-    if status == "stopped":
-        return (ANTIVIRUS_OFF_SCORE, "Antivirus Service Stopped")
+    # Logic depends on raw data format, assuming 'state' or similar
+    # Placeholder: return 0 for now to avoid noise
     return (0, "")
 
-def _score_fim(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, str]:
-    path = log_columns.get("target_path", "")
-    if "Temp" in path or "AppData" in path:
-         return (FIM_CHANGE_SCORE, f"File Modification Detected in Sensitive Area: {path}")
-    return (FIM_CHANGE_SCORE, "File Modification Detected")
+def _score_chrome_extensions(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, str]:
+    name = log_columns.get("name", "")
+    ext_block = kwargs.get("ext_block_list", [])
+    if _is_match(name, ext_block):
+        return (KNOWN_BAD_ITEM_SCORE, f"Malicious Extension: {name}")
+    return (0, "")
 
-# --- 5. ROUTING ---
+# --- 5. MAPPING ---
 QUERY_SCORING_MAP = {
-    "process_events": _score_process_event,
-    "processes": _score_process_event,
-    "programs": _score_installed_apps, 
-    "chrome_extensions": _score_browser_extensions,
-    "firefox_addons": _score_browser_extensions,
+    "process_events": _score_process_anomaly,
+    "programs": _score_programs,
     "open_sockets": _score_open_sockets,
-    "startup_items": _score_startup_items,   
-    "system_info": _score_system_info, 
-    "windows_firewall_status": _score_firewall,
-    "antivirus_product": _score_antivirus,
-    "antivirus_status": _score_antivirus,
-    "fim": _score_fim,
-    
-    # Map remaining to zero
-    "os_version": _return_zero,
+    "startup_items": _score_startup_items,
+    "listening_ports": _score_listening_ports,
     "patches": _score_patches,
-    "missing_patches": _score_patches,
-    "bitlocker_info": _return_zero,
-    "listening_ports": _return_zero,
-    "windows_event_log": _return_zero,
-    "windows_event_log_logons": _return_zero,
-    "logged_in_users": _return_zero,
+    "antivirus_status": _score_antivirus,
+    "chrome_extensions": _score_chrome_extensions
 }
 
-# MAIN SCORING FUNCTION
+# --- 6. MAIN SCORING LOGIC ---
 def score_logs(logs: List[Dict[str, Any]], 
-               app_allow_list: List[Dict[str, str]] = None, 
-               app_block_list: List[Dict[str, str]] = None,
-               ext_allow_list: List[Dict[str, str]] = None,
-               ext_block_list: List[Dict[str, str]] = None) -> Tuple[int, List[Dict[str, Any]]]:
+               app_allow_list=None, 
+               app_block_list=None,
+               ext_allow_list=None,
+               ext_block_list=None) -> Tuple[int, List[Dict[str, Any]]]:
     
     total_score = 0
     detailed_risks = []
-    seen_anomalies = set() 
-    
+    seen_anomalies = set() # Dedup within batch
+
+    # Default lists if None
     app_allow = app_allow_list if app_allow_list else []
     app_block = app_block_list if app_block_list else []
     ext_allow = ext_allow_list if ext_allow_list else []
@@ -236,6 +171,7 @@ def score_logs(logs: List[Dict[str, Any]],
             
             if score > 0:
                 risk_key = f"{query_name}:{reason}"
+                # Prevent duplicate alerts in the same batch from inflating score artificially
                 if risk_key not in seen_anomalies:
                     total_score += score
                     detailed_risks.append({
@@ -249,7 +185,9 @@ def score_logs(logs: List[Dict[str, Any]],
     return total_score, detailed_risks
 
 def categorize_health(total_risk_score: int) -> str:
-    if total_risk_score == 0: return "Healthy"
-    if 1 <= total_risk_score < 50: return "Low Risk"
-    if 50 <= total_risk_score < 100: return "Warning"
-    return "Critical"
+    if total_risk_score == 0:
+        return "Healthy"
+    elif total_risk_score < 50:
+        return "Needs Attention"
+    else:
+        return "At Risk (Flagged)"
