@@ -59,9 +59,15 @@ def _score_process_anomaly(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, 
     if "osquery_shipper" in cmdline:
         return (0, "")
         
-    safe_system_procs = ["svchost.exe", "system", "registry", "smss.exe", "csrss.exe", 
-                         "wininit.exe", "services.exe", "lsass.exe", "msmpeng.exe", 
-                         "explorer.exe", "taskmgr.exe", "audiodg.exe"]
+    # EXPANDED Safe List for Windows System Processes
+    # These processes often have high accumulated CPU time but low RAM
+    safe_system_procs = [
+        "svchost.exe", "system", "registry", "smss.exe", "csrss.exe", 
+        "wininit.exe", "services.exe", "lsass.exe", "lsaiso.exe", # Added LsaIso
+        "msmpeng.exe", "explorer.exe", "taskmgr.exe", "audiodg.exe",
+        "winlogon.exe", "fontdrvhost.exe", "dwm.exe", "spoolsv.exe" # Added reported false positives
+    ]
+    
     if name in safe_system_procs:
         return (0, "")
 
