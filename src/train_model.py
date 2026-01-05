@@ -35,7 +35,7 @@ general_data = np.column_stack((general_cpu, general_mem))
 # "Playing" - Valorant, Cyberpunk, Compiling Code
 # Research: Valorant (30-60% CPU, 4GB RAM), Cyberpunk (80% CPU, 10GB RAM)
 # We set the ceiling high to avoid false positives on AAA games
-heavy_cpu = np.random.uniform(30, 95, 500)      # 30% to 95%
+heavy_cpu = np.random.uniform(30, 60, 500)      # 30% to 60%
 heavy_mem = np.random.uniform(3000, 16000, 500) # 3GB to 16GB
 heavy_data = np.column_stack((heavy_cpu, heavy_mem))
 
