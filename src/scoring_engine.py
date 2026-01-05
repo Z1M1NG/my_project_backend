@@ -23,10 +23,21 @@ KNOWN_BAD_ITEM_SCORE = 100
 OLD_OS_SCORE = 30
 
 # --- 3. HELPER FUNCTIONS ---
-def _is_match(value: str, pattern_list: List[str]) -> bool:
+def _is_match(value: str, pattern_list: List[Any]) -> bool:
+    """
+    Checks if 'value' matches any pattern in 'pattern_list'.
+    Robustly handles cases where pattern_list contains dicts (from ES) or strings.
+    """
     val = value.lower()
     for pattern in pattern_list:
-        if pattern.lower() in val:
+        # CRITICAL FIX: Handle dictionaries from Elasticsearch
+        if isinstance(pattern, dict):
+            # Extract 'name' or 'app' key if present
+            pat_str = pattern.get("name", "") or pattern.get("app", "")
+        else:
+            pat_str = str(pattern)
+            
+        if pat_str and pat_str.lower() in val:
             return True
     return False
 
