@@ -17,7 +17,7 @@ FIREWALL_OFF_SCORE = 50
 ANTIVIRUS_OFF_SCORE = 50
 MALICIOUS_C2_SCORE = 80
 PERSISTENCE_SCORE = 40
-PROCESS_ANOMALY_SCORE = 60  # <--- CRITICAL: Updated to 60 to trigger AI
+PROCESS_ANOMALY_SCORE = 60  # Trigger AI threshold (>50)
 FIM_CHANGE_SCORE = 60
 KNOWN_BAD_ITEM_SCORE = 100
 OLD_OS_SCORE = 30
@@ -30,7 +30,7 @@ def _is_match(value: str, pattern_list: List[Any]) -> bool:
     """
     val = value.lower()
     for pattern in pattern_list:
-        # CRITICAL FIX: Handle dictionaries from Elasticsearch
+        # Handle dictionaries from Elasticsearch
         if isinstance(pattern, dict):
             # Extract 'name' or 'app' key if present
             pat_str = pattern.get("name", "") or pattern.get("app", "")
@@ -46,7 +46,7 @@ def _is_match(value: str, pattern_list: List[Any]) -> bool:
 def _score_process_anomaly(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, str]:
     """
     Uses Isolation Forest to detect High CPU / Low RAM anomalies.
-    Includes filtering for noise and clamping for raw CPU values.
+    Includes comprehensive filtering for Windows system noise.
     """
     if process_model is None:
         return (0, "")
@@ -54,18 +54,34 @@ def _score_process_anomaly(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, 
     name = log_columns.get("name", "").lower()
     cmdline = log_columns.get("cmdline", "").lower()
     
-    # --- NOISE FILTER: Ignore Agent and System Processes ---
-    # Prevents self-flagging or flagging Windows services that accumulate high CPU time
+    # --- NOISE FILTER: Ignore Agent and known System Processes ---
+    
+    # 1. Ignore the Agent itself
     if "osquery_shipper" in cmdline:
         return (0, "")
         
-    # EXPANDED Safe List for Windows System Processes
-    # These processes often have high accumulated CPU time but low RAM
+    # 2. Comprehensive Safe List for Windows Background Services
+    # These processes accumulate high CPU "ticks" over time but use low RAM.
+    # We ignore them to prevent false positives caused by the clamping logic.
     safe_system_procs = [
+        # Core System
         "svchost.exe", "system", "registry", "smss.exe", "csrss.exe", 
-        "wininit.exe", "services.exe", "lsass.exe", "lsaiso.exe", # Added LsaIso
-        "msmpeng.exe", "explorer.exe", "taskmgr.exe", "audiodg.exe",
-        "winlogon.exe", "fontdrvhost.exe", "dwm.exe", "spoolsv.exe" # Added reported false positives
+        "wininit.exe", "services.exe", "lsass.exe", "lsaiso.exe",
+        "winlogon.exe", "fontdrvhost.exe", "dwm.exe", "spoolsv.exe",
+        "ntoskrnl.exe", "werfault.exe", "wermgr.exe",
+        
+        # Windows UI & Shell
+        "explorer.exe", "taskmgr.exe", "sihost.exe", "taskhostw.exe",
+        "shellexperiencehost.exe", "startmenuexperiencehost.exe",
+        "searchindexer.exe", "ctfmon.exe", "conhost.exe", "runtimebroker.exe",
+        "applicationframehost.exe", "lockapp.exe",
+        
+        # Windows Components
+        "msmpeng.exe", "nissrv.exe", "audiodg.exe", "wlanext.exe",
+        "wmiprvse.exe", "wmiadap.exe", "dashost.exe", "dllhost.exe",
+        "smartscreen.exe", "securityhealthservice.exe", "sgrmbroker.exe",
+        "useroobebroker.exe", "backgroundtaskhost.exe", "aggregatorhost.exe",
+        "tiworker.exe", "trustedinstaller.exe", "mousoercoreworker.exe"
     ]
     
     if name in safe_system_procs:
@@ -87,7 +103,6 @@ def _score_process_anomaly(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, 
             return (PROCESS_ANOMALY_SCORE, f"Anomalous Behavior Detected (CPU: {cpu:.1f}%, Mem: {mem:.1f}MB)")
             
     except Exception as e:
-        # Fail safe to 0 if data is malformed
         return (0, "")
         
     return (0, "")
@@ -97,11 +112,9 @@ def _score_programs(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, str]:
     app_block = kwargs.get("app_block_list", [])
     app_allow = kwargs.get("app_allow_list", [])
     
-    # 1. Check Allowlist (Explicitly Safe)
     if _is_match(name, app_allow):
         return (0, "")
         
-    # 2. Check Blocklist (Explicitly Bad)
     if _is_match(name, app_block):
         return (KNOWN_BAD_ITEM_SCORE, f"Policy Violation: {name}")
         
@@ -109,13 +122,11 @@ def _score_programs(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, str]:
 
 def _score_open_sockets(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, str]:
     remote_port = log_columns.get("remote_port", 0)
-    # Heuristic: Common C2 ports
     if str(remote_port) in ["4444", "1337", "6667"]:
         return (MALICIOUS_C2_SCORE, f"Suspicious C2 Connection (Port {remote_port})")
     return (0, "")
 
 def _score_patches(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, str]:
-    # Placeholder for patch logic
     return (0, "") 
 
 def _score_startup_items(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, str]:
@@ -127,14 +138,11 @@ def _score_startup_items(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, st
 
 def _score_listening_ports(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, str]:
     port = log_columns.get("port", 0)
-    # Simple check for risky open ports
     if str(port) in ["23", "21", "3389"]: 
         return (10, f"Risky Open Port: {port}")
     return (0, "")
 
 def _score_antivirus(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, str]:
-    # Logic depends on raw data format, assuming 'state' or similar
-    # Placeholder: return 0 for now to avoid noise
     return (0, "")
 
 def _score_chrome_extensions(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, str]:
@@ -165,9 +173,8 @@ def score_logs(logs: List[Dict[str, Any]],
     
     total_score = 0
     detailed_risks = []
-    seen_anomalies = set() # Dedup within batch
+    seen_anomalies = set()
 
-    # Default lists if None
     app_allow = app_allow_list if app_allow_list else []
     app_block = app_block_list if app_block_list else []
     ext_allow = ext_allow_list if ext_allow_list else []
@@ -188,7 +195,6 @@ def score_logs(logs: List[Dict[str, Any]],
             
             if score > 0:
                 risk_key = f"{query_name}:{reason}"
-                # Prevent duplicate alerts in the same batch from inflating score artificially
                 if risk_key not in seen_anomalies:
                     total_score += score
                     detailed_risks.append({
