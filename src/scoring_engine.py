@@ -58,11 +58,15 @@ def _score_process_anomaly(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, 
     # --- NOISE FILTER 1: Ignore the Agent itself ---
     if "osquery_shipper" in cmdline:
         return (0, "")
+
+    # --- NOISE FILTER 2: Explicit Name Whitelist (Fixes Registry/Mem Compression) ---
+    # These kernel processes often accumulate 100% CPU ticks but are safe.
+    ignored_names = ["registry", "memory compression", "system", "secure system"]
+    if name in ignored_names:
+        return (0, "")
         
-    # --- NOISE FILTER 2: PATH-BASED WHITELISTING (The Scalable Fix) ---
-    # Instead of listing 100 names, we ignore trusted directories.
-    
-    # 1. Ignore empty paths (Kernel processes like System, Registry usually have no path)
+    # --- NOISE FILTER 3: PATH-BASED WHITELISTING ---
+    # 1. Ignore empty paths (Kernel processes usually have no path)
     if not path:
         return (0, "")
 
@@ -70,8 +74,7 @@ def _score_process_anomaly(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, 
     if path.startswith("c:\\windows\\"):
         return (0, "")
         
-    # 3. Ignore installed Program Files (Optional: keep if you trust installed apps)
-    # This prevents False Positives from heavy apps like Photoshop or IDEs
+    # 3. Ignore installed Program Files
     if path.startswith("c:\\program files"):
         return (0, "")
 
