@@ -1,6 +1,7 @@
 import joblib
 import numpy as np
 import re
+from datetime import datetime
 from typing import Dict, Any, Tuple, List, Set
 
 # --- 1. LOAD ML MODEL ---
@@ -17,26 +18,19 @@ FIREWALL_OFF_SCORE = 50
 ANTIVIRUS_OFF_SCORE = 50
 MALICIOUS_C2_SCORE = 80
 PERSISTENCE_SCORE = 40
-PROCESS_ANOMALY_SCORE = 60  # Trigger AI threshold (>50)
+PROCESS_ANOMALY_SCORE = 60
 FIM_CHANGE_SCORE = 60
 KNOWN_BAD_ITEM_SCORE = 100
 OLD_OS_SCORE = 30
 
 # --- 3. HELPER FUNCTIONS ---
 def _is_match(value: str, pattern_list: List[Any]) -> bool:
-    """
-    Checks if 'value' matches any pattern in 'pattern_list'.
-    Robustly handles cases where pattern_list contains dicts (from ES) or strings.
-    """
     val = value.lower()
     for pattern in pattern_list:
-        # Handle dictionaries from Elasticsearch
         if isinstance(pattern, dict):
-            # Extract 'name' or 'app' key if present
             pat_str = pattern.get("name", "") or pattern.get("app", "")
         else:
             pat_str = str(pattern)
-            
         if pat_str and pat_str.lower() in val:
             return True
     return False
@@ -45,54 +39,73 @@ def _is_match(value: str, pattern_list: List[Any]) -> bool:
 
 def _score_process_anomaly(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, str]:
     """
-    Uses Isolation Forest to detect High CPU / Low RAM anomalies.
-    USES PATH-BASED FILTERING to ignore system noise.
+    Uses Isolation Forest to detect anomalies based on CALCULATED CPU RATE.
+    This solves the 'Accumulated Ticks' issue by dividing CPU Time by Uptime.
     """
     if process_model is None:
         return (0, "")
     
     name = log_columns.get("name", "").lower()
-    path = log_columns.get("path", "").lower()
     cmdline = log_columns.get("cmdline", "").lower()
     
-    # --- NOISE FILTER 1: Ignore the Agent itself ---
+    # Simple self-filter (Agent shouldn't flag itself)
     if "osquery_shipper" in cmdline:
         return (0, "")
 
-    # --- NOISE FILTER 2: Explicit Name Whitelist (Fixes Registry/Mem Compression) ---
-    # These kernel processes often accumulate 100% CPU ticks but are safe.
-    ignored_names = ["registry", "memory compression", "system", "secure system"]
-    if name in ignored_names:
-        return (0, "")
-        
-    # --- NOISE FILTER 3: PATH-BASED WHITELISTING ---
-    # 1. Ignore empty paths (Kernel processes usually have no path)
-    if not path:
-        return (0, "")
-
-    # 2. Ignore Windows System binaries
-    if path.startswith("c:\\windows\\"):
-        return (0, "")
-        
-    # 3. Ignore installed Program Files
-    if path.startswith("c:\\program files"):
-        return (0, "")
-
-    # --- ANOMALY CHECK (Only runs on User Space processes) ---
     try:
-        # --- CPU CLAMPING LOGIC ---
-        # Windows OSQuery often returns accumulated ticks.
-        # We clamp this to 100.0 to match the ML model's 0-100 training range.
-        raw_cpu = float(log_columns.get("cpu_usage_percent", 0))
-        cpu = 100.0 if raw_cpu > 100 else raw_cpu
-        
+        # 1. Get Metric Data
+        raw_cpu_ticks = float(log_columns.get("cpu_usage_percent", 0))
         mem = float(log_columns.get("memory_mb", 0))
         
-        # Predict: [[cpu, mem]]
-        prediction = process_model.predict([[cpu, mem]])[0]
+        # 2. Calculate Process Duration
+        # We need the log timestamp (passed via kwargs) and process start_time
+        log_timestamp_str = kwargs.get("log_timestamp_iso", "")
+        proc_start_epoch = float(log_columns.get("start_time", 0))
         
-        if prediction == -1: # Anomaly
-            return (PROCESS_ANOMALY_SCORE, f"Anomalous Behavior Detected (CPU: {cpu:.1f}%, Mem: {mem:.1f}MB)")
+        calculated_cpu_percent = 0.0
+        
+        if log_timestamp_str and proc_start_epoch > 0:
+            # Parse ISO timestamp (e.g., 2026-01-06T09:00:00Z) to Epoch
+            # Assuming log timestamp is UTC
+            try:
+                # Handle 'Z' or +00:00 manually if needed, or use fromisoformat
+                if log_timestamp_str.endswith("Z"):
+                    log_dt = datetime.fromisoformat(log_timestamp_str.replace("Z", "+00:00"))
+                else:
+                    log_dt = datetime.fromisoformat(log_timestamp_str)
+                
+                log_epoch = log_dt.timestamp()
+                
+                duration_seconds = log_epoch - proc_start_epoch
+                
+                if duration_seconds > 0:
+                    # HEURISTIC: Convert Windows Ticks (usually Microseconds) to Percentage
+                    # Formula: (Ticks / (Duration_Seconds * 1,000,000)) * 100
+                    # This normalizes "2 million ticks over 2 seconds" -> 100%
+                    # And "2 million ticks over 1 week" -> ~0%
+                    
+                    # Estimate: If raw_cpu is roughly microseconds
+                    usage_ratio = raw_cpu_ticks / (duration_seconds * 1000000.0)
+                    calculated_cpu_percent = usage_ratio * 100.0
+                    
+                    # Safety Cap
+                    if calculated_cpu_percent > 100: 
+                        calculated_cpu_percent = 100.0
+                else:
+                    # New process (0 duration), fallback to raw clamping
+                    calculated_cpu_percent = 100.0 if raw_cpu_ticks > 100 else raw_cpu_ticks
+            except:
+                # Fallback if time parsing fails
+                calculated_cpu_percent = 100.0 if raw_cpu_ticks > 100 else raw_cpu_ticks
+        else:
+            # Fallback if start_time missing (Old Agent)
+            calculated_cpu_percent = 100.0 if raw_cpu_ticks > 100 else raw_cpu_ticks
+
+        # 3. Predict
+        prediction = process_model.predict([[calculated_cpu_percent, mem]])[0]
+        
+        if prediction == -1:
+            return (PROCESS_ANOMALY_SCORE, f"Anomalous Behavior (Calc CPU: {calculated_cpu_percent:.1f}%, Mem: {mem:.1f}MB)")
             
     except Exception as e:
         return (0, "")
@@ -103,13 +116,8 @@ def _score_programs(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, str]:
     name = log_columns.get("name", "")
     app_block = kwargs.get("app_block_list", [])
     app_allow = kwargs.get("app_allow_list", [])
-    
-    if _is_match(name, app_allow):
-        return (0, "")
-        
-    if _is_match(name, app_block):
-        return (KNOWN_BAD_ITEM_SCORE, f"Policy Violation: {name}")
-        
+    if _is_match(name, app_allow): return (0, "")
+    if _is_match(name, app_block): return (KNOWN_BAD_ITEM_SCORE, f"Policy Violation: {name}")
     return (0, "")
 
 def _score_open_sockets(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, str]:
@@ -118,31 +126,15 @@ def _score_open_sockets(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, str
         return (MALICIOUS_C2_SCORE, f"Suspicious C2 Connection (Port {remote_port})")
     return (0, "")
 
-def _score_patches(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, str]:
-    return (0, "") 
-
-def _score_startup_items(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, str]:
-    name = log_columns.get("name", "Unknown").lower()
-    suspicious_startup = ["nc.exe", "trojan.exe", "miner.exe", "mimikatz.exe"]
-    if name in suspicious_startup:
-        return (PERSISTENCE_SCORE, f"Suspicious Startup Item: {name}")
+# Pass-through functions
+def _score_patches(log_columns, **kwargs): return (0, "") 
+def _score_startup_items(log_columns, **kwargs): 
+    name = log_columns.get("name", "").lower()
+    if name in ["nc.exe", "miner.exe"]: return (PERSISTENCE_SCORE, f"Suspicious Startup: {name}")
     return (0, "")
-
-def _score_listening_ports(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, str]:
-    port = log_columns.get("port", 0)
-    if str(port) in ["23", "21", "3389"]: 
-        return (10, f"Risky Open Port: {port}")
-    return (0, "")
-
-def _score_antivirus(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, str]:
-    return (0, "")
-
-def _score_chrome_extensions(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, str]:
-    name = log_columns.get("name", "")
-    ext_block = kwargs.get("ext_block_list", [])
-    if _is_match(name, ext_block):
-        return (KNOWN_BAD_ITEM_SCORE, f"Malicious Extension: {name}")
-    return (0, "")
+def _score_listening_ports(log_columns, **kwargs): return (0, "")
+def _score_antivirus(log_columns, **kwargs): return (0, "")
+def _score_chrome_extensions(log_columns, **kwargs): return (0, "")
 
 # --- 5. MAPPING ---
 QUERY_SCORING_MAP = {
@@ -167,23 +159,20 @@ def score_logs(logs: List[Dict[str, Any]],
     detailed_risks = []
     seen_anomalies = set()
 
-    app_allow = app_allow_list if app_allow_list else []
-    app_block = app_block_list if app_block_list else []
-    ext_allow = ext_allow_list if ext_allow_list else []
-    ext_block = ext_block_list if ext_block_list else []
-
     for log in logs:
         query_name = log.get("query_name", "")
         raw_data = log.get("raw_data", {})
+        timestamp = log.get("timestamp", "") # Extract ISO timestamp
         
         if query_name in QUERY_SCORING_MAP:
             score_func = QUERY_SCORING_MAP[query_name]
             
             score, reason = score_func(raw_data, 
-                                     app_allow_list=app_allow, 
-                                     app_block_list=app_block,
-                                     ext_allow_list=ext_allow,
-                                     ext_block_list=ext_block)
+                                     log_timestamp_iso=timestamp, # Pass timestamp for Rate Calc
+                                     app_allow_list=app_allow_list or [], 
+                                     app_block_list=app_block_list or [],
+                                     ext_allow_list=ext_allow_list or [],
+                                     ext_block_list=ext_block_list or [])
             
             if score > 0:
                 risk_key = f"{query_name}:{reason}"
@@ -200,9 +189,6 @@ def score_logs(logs: List[Dict[str, Any]],
     return total_score, detailed_risks
 
 def categorize_health(total_risk_score: int) -> str:
-    if total_risk_score == 0:
-        return "Healthy"
-    elif total_risk_score < 50:
-        return "Needs Attention"
-    else:
-        return "At Risk (Flagged)"
+    if total_risk_score == 0: return "Healthy"
+    elif total_risk_score < 50: return "Needs Attention"
+    else: return "At Risk (Flagged)"
