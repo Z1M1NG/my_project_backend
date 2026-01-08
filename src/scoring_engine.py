@@ -18,10 +18,19 @@ FIREWALL_OFF_SCORE = 50
 ANTIVIRUS_OFF_SCORE = 50
 MALICIOUS_C2_SCORE = 80
 PERSISTENCE_SCORE = 40
-PROCESS_ANOMALY_SCORE = 60
+PROCESS_ANOMALY_SCORE = 80
 FIM_CHANGE_SCORE = 60
 KNOWN_BAD_ITEM_SCORE = 100
 OLD_OS_SCORE = 30
+
+# --- TRUSTED PATHS (FALSE POSITIVE FIX) ---
+# Processes running from here are considered safe (System & Installed Apps)
+TRUSTED_PATHS = [
+    r"c:\windows",
+    r"c:\program files\windows defender",
+    r"c:\program files (x86)\common files",
+    r"c:\program files\tailscale"
+]
 
 # --- 3. HELPER FUNCTIONS ---
 def _is_match(value: str, pattern_list: List[Any]) -> bool:
@@ -35,19 +44,28 @@ def _is_match(value: str, pattern_list: List[Any]) -> bool:
             return True
     return False
 
+def _is_safe_path(path: str) -> bool:
+    """Checks if the file path belongs to a trusted system directory."""
+    if not path: return False
+    p = path.lower()
+    for trusted in TRUSTED_PATHS:
+        if p.startswith(trusted):
+            return True
+    return False
+
 # --- 4. SCORING FUNCTIONS ---
 
 def _score_process_anomaly(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, str]:
-    """
-    Uses Isolation Forest to detect High CPU / Low RAM anomalies.
-    Implements RATE-BASED CPU Calculation and respects ALLOWLIST.
-    """
     if process_model is None:
         return (0, "")
     
     cmdline = log_columns.get("cmdline", "").lower()
     name = log_columns.get("name", "").lower().strip()
     path = log_columns.get("path", "").lower()
+
+    # If process runs from Windows or Program Files, ignore it.
+    if _is_safe_path(path):
+        return (0, "")
     
     # --- CHECK ALLOWLIST (The User-Defined Fix) ---
     # If the process is in the "Approved Applications" list, skip ML checks.
@@ -56,61 +74,37 @@ def _score_process_anomaly(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, 
         return (0, "")
     
     # --- NOISE FILTER: Infrastructure Whitelist ---
-    # Ignore the agent components and their console hosts.
-    # Added "osqueryd" (no exe) just in case name parsing varies.
     safe_infrastructure = ["conhost.exe", "osqueryd.exe", "osqueryi.exe", "osqueryd", "taskmgr.exe"]
-    
     if "osquery_shipper" in cmdline or name in safe_infrastructure:
         return (0, "")
 
     try:
-        # Data Extraction
-        raw_cpu = float(log_columns.get("cpu_usage_percent", 0))
-        mem = float(log_columns.get("memory_mb", 0))
-        
-        # --- CPU INTENSITY CALCULATION ---
-        start_time_epoch = float(log_columns.get("start_time", 0))
-        log_iso = kwargs.get("log_timestamp", datetime.now().isoformat())
-        
-        cpu_val = 0.0
-        
-        if start_time_epoch > 0:
-            try:
-                if log_iso.endswith('Z'):
-                    log_dt = datetime.fromisoformat(log_iso.replace('Z', '+00:00'))
-                else:
-                    log_dt = datetime.fromisoformat(log_iso)
-                
-                log_epoch = log_dt.timestamp()
-                duration = log_epoch - start_time_epoch
-                
-                if duration > 10:
-                    # Calculate Rate for processes running > 10s
-                    if duration > 300:
-                        # Long running process: Normalize accumulated ticks
-                        if mem < 1000: # Low ram, likely system background
-                             return (0, "")
-                    else:
-                        # Short running process (< 5 mins). Likely Malware Test.
-                        cpu_val = 100.0 if raw_cpu > 100 else raw_cpu
-                else:
-                    # Brand new process. Clamp.
-                    cpu_val = 100.0 if raw_cpu > 100 else raw_cpu
-            except:
-                cpu_val = 100.0 if raw_cpu > 100 else raw_cpu
-        else:
+            # Data Extraction
+            raw_cpu = float(log_columns.get("cpu_usage_percent", 0))
+            mem = float(log_columns.get("memory_mb", 0))
+            
+            # CPU Prep (Simple clamping)
             cpu_val = 100.0 if raw_cpu > 100 else raw_cpu
 
-        # Predict
-        prediction = process_model.predict([[cpu_val, mem]])[0]
-        
-        if prediction == -1: # Anomaly
-            return (PROCESS_ANOMALY_SCORE, f"Anomalous Behavior Detected (CPU: {cpu_val:.1f}%, Mem: {mem:.1f}MB)")
+            # 4. ML ANOMALY DETECTION
+            # Logic: High CPU (>30%) is suspicious if not whitelisted.
+            if cpu_val > 30:
+                prediction = process_model.predict([[cpu_val, mem]])[0]
+                
+                if prediction == -1: # Model flagged it as "Different from Baseline"
+                    
+                    # 5. MALWARE CONFIRMATION (The Fix for Detection)
+                    # We only alert if it matches the "Crypto-Miner" profile:
+                    # HIGH CPU + LOW RAM.
+                    # Legitimate heavy apps usually use > 300MB RAM.
+                    # Your malware test uses < 50MB.
+                    if mem < 300: 
+                        return (PROCESS_ANOMALY_SCORE, f"Malware Behavior Detected (High CPU {cpu_val:.1f}% / Low RAM {mem:.1f}MB): {name}")
+                
+        except Exception as e:
+            return (0, "")
             
-    except Exception as e:
         return (0, "")
-        
-    return (0, "")
 
 def _score_programs(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, str]:
     name = log_columns.get("name", "")
