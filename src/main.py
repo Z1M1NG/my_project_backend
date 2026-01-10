@@ -30,7 +30,7 @@ os.environ["no_proxy"] = "localhost,127.0.0.1"
 
 try:
     es_host = "http://127.0.0.1:9200"
-    es = AsyncElasticsearch(es_host, basic_auth=("elastic", ELASTIC_PASSWORD))
+    es = AsyncElasticsearch(es_host, basic_auth=("elastic", ELASTIC_PASSWORD), request_timeout=30, max_retries=3, retry_on_timeout=True)
     print(Fore.GREEN + f"Async client initialized for {es_host}")
 except Exception as e:
     print(Fore.RED + f"FATAL: Elastic error: {e}")
