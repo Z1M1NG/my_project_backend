@@ -111,7 +111,7 @@ def _score_process_anomaly(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, 
     return (0, "")
 
 def _score_programs(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, str]:
-    name = log_columns.get("name", "").lower
+    name = log_columns.get("name", "").lower()
     app_block = kwargs.get("app_block_list", [])
     app_allow = kwargs.get("app_allow_list", [])
     if _is_match(name, app_allow): return (0, "")
