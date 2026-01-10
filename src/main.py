@@ -108,7 +108,7 @@ async def run_ai_analysis(host: str, client_ip: str, total_score: int, risks: Li
         print(Fore.RED + f"   ❌ Ollama failed: {e}", flush=True)
         final_summary = f"AI Error: {str(e)}"
     
-    # Save result to ES
+    # --- SAVE TO ELASTIC (Inside Background Task) ---
     health_document = {
         "timestamp": datetime.datetime.now(datetime.timezone.utc),
         "hostname": host,
@@ -130,7 +130,7 @@ async def receive_log(batch: LogBatch, background_tasks: BackgroundTasks):
 
     host = logs[0].get("hostname", "Unknown")
     
-    # FIX: Get IP from the first log (It will be there because we fixed the shipper)
+    # FIX: Get IP from the first log
     client_ip = logs[0].get("client_ip", "Unknown") 
 
     # 1. Fetch Intelligence
@@ -177,6 +177,7 @@ async def receive_log(batch: LogBatch, background_tasks: BackgroundTasks):
             # FIX: Pass to Background Task to avoid timeout
             background_tasks.add_task(run_ai_analysis, host, client_ip, total_score, risks, health_status)
         else:
-            pass
+            # --- RESTORED PRINT STATEMENT ---
+            print(Fore.YELLOW + f"   Skipping AI (Cooldown active).", flush=True)
 
     return {"status": "processed", "score": total_score}
