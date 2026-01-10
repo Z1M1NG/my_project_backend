@@ -13,7 +13,7 @@ from colorama import Fore, init
 init(autoreset=True)
 
 # --- CONFIGURATION ---
-AI_COOLDOWN_SECONDS = 300 
+AI_COOLDOWN_SECONDS = 180 
 last_ai_call = {}
 AI_MODEL_NAME = 'gemma2:2b'
 
@@ -106,9 +106,10 @@ async def receive_log(batch: LogBatch):
         last_time = last_ai_call.get(host, 0)
         
         if (current_time - last_time) > AI_COOLDOWN_SECONDS:
+            last_ai_call[host] = current_time
             print(Fore.CYAN + f"   ⚠️ High Risk! Invoking {AI_MODEL_NAME}...", flush=True)
             
-            sorted_risks = sorted(risks, key=lambda x: x['score'], reverse=True)[:5]
+            sorted_risks = sorted(risks, key=lambda x: x['score'], reverse=True)[:10]
             
             prompt = (
                 f"Role: Tier 3 Security Analyst. System: '{host}' (Score: {total_score}).\n"
@@ -118,7 +119,7 @@ async def receive_log(batch: LogBatch):
                 f"1. If a log says 'Blocked Application' or 'Blocked Extension', explicitly name it.\n"
                 f"2. Ignore generic system processes unless explicitly blocked.\n\n"
                 f"Output Format:\n"
-                f"**Summary:** <One clear sentence describing the main threat>\n"
+                f"**Summary:** <One clear sentence describing the main threat in point form and make it concise>\n"
                 f"**Verdict:** <Critical Malware / Policy Violation / C2 Activity>\n"
                 f"**Detected Threats:**\n"
                 f"- <Name> : <Reason>\n"
@@ -132,7 +133,7 @@ async def receive_log(batch: LogBatch):
                     return ollama.chat(
                         model=AI_MODEL_NAME, 
                         messages=[{'role': 'user', 'content': prompt}],
-                        options={'num_predict': 500} # Increased limit
+                        options={'num_predict': 900} # Increased limit
                     )
                 
                 response = await asyncio.to_thread(run_ollama)
@@ -153,7 +154,7 @@ async def receive_log(batch: LogBatch):
             "total_risk_score": total_score,
             "health_status": health_status,
             "ai_summary": final_summary,
-            "top_risks": risks[:10]
+            "top_risks": risks[:20]
         }
         try:
             await es.index(index="host-health-status", document=health_document)
