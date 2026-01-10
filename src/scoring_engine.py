@@ -111,11 +111,24 @@ def _score_process_anomaly(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, 
     return (0, "")
 
 def _score_programs(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, str]:
-    name = log_columns.get("name", "")
+    name = log_columns.get("name", "").lower
     app_block = kwargs.get("app_block_list", [])
     app_allow = kwargs.get("app_allow_list", [])
     if _is_match(name, app_allow): return (0, "")
-    if _is_match(name, app_block): return (KNOWN_BAD_ITEM_SCORE, f"Policy Violation: {name}")
+    for item in app_block:
+        # Handle both dicts (from ES) and simple strings
+        if isinstance(item, dict):
+            blocked_name = item.get("name", "").lower()
+            policy_name = item.get("policy", "General Security Policy") # Default if missing
+        else:
+            blocked_name = str(item).lower()
+            policy_name = "General Security Policy"
+
+        # Check if the blocked keyword is inside the running process name
+        if blocked_name and blocked_name in name:
+            # RETURN THE SPECIFIC POLICY NAME HERE
+            return (KNOWN_BAD_ITEM_SCORE, f"Policy Violation [{policy_name}]: {log_columns.get('name')}")
+
     return (0, "")
 
 def _score_open_sockets(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, str]:
