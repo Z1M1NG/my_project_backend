@@ -62,6 +62,10 @@ def _score_process_anomaly(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, 
     cmdline = log_columns.get("cmdline", "").lower()
     name = log_columns.get("name", "").lower().strip()
     path = log_columns.get("path", "").lower()
+
+    kernel_processes = ["system", "registry", "secure system", "memory compression"]
+    if name in kernel_processes:
+        return (0, "")
     
     # 1. PATH WHITELIST (Fix for System False Positives)
     # If process runs from Windows or Program Files, ignore it.
@@ -74,7 +78,7 @@ def _score_process_anomaly(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, 
         return (0, "")
     
     # 3. INFRASTRUCTURE NOISE FILTER
-    safe_infrastructure = ["conhost.exe", "osqueryd.exe", "osqueryi.exe", "taskmgr.exe"]
+    safe_infrastructure = ["conhost.exe", "osqueryd.exe", "osqueryi.exe", "taskmgr.exe", "wsc_proxy.exe", "avdump.exe", "antivirus"]
     if "osquery_shipper" in cmdline or name in safe_infrastructure:
         return (0, "")
 
