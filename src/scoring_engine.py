@@ -144,9 +144,70 @@ def _score_startup_items(log_columns, **kwargs):
     name = log_columns.get("name", "").lower()
     if name in ["nc.exe", "miner.exe"]: return (PERSISTENCE_SCORE, f"Suspicious Startup Item: {name}")
     return (0, "")
-def _score_listening_ports(log_columns, **kwargs): return (0, "")
-def _score_antivirus(log_columns, **kwargs): return (0, "")
-def _score_chrome_extensions(log_columns, **kwargs): return (0, "")
+def _score_listening_ports(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, str]:
+    # Data from Osquery: address, port, protocol, pid
+    port = str(log_columns.get("port", ""))
+    address = log_columns.get("address", "")
+    
+    # RISKY PORTS LIST (Common targets for attackers)
+    # 21=FTP, 22=SSH, 23=Telnet, 445=SMB(WannaCry), 3389=RDP, 135=RPC
+    RISKY_PORTS = ["21", "22", "23", "445", "3389", "135"]
+    
+    # Logic: If a risky port is listening on "0.0.0.0" (All Interfaces), it's a major risk.
+    if address == "0.0.0.0" and port in RISKY_PORTS:
+        # Uses your existing MALICIOUS_C2_SCORE (80) or similar high score
+        return (MALICIOUS_C2_SCORE, f"High Risk Exposure: Critical Port {port} is Open to Public")
+
+    return (0, "")
+
+def _score_antivirus(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, str]:
+    # Data from Osquery: name, status, start_mode
+    name = log_columns.get("name", "")
+    status = str(log_columns.get("status", "")).upper() # e.g., "RUNNING", "STOPPED"
+    
+    # 1. Check Windows Defender (Antivirus)
+    if name == "WinDefend":
+        if status != "RUNNING":
+            return (ANTIVIRUS_OFF_SCORE, "CRITICAL: Windows Defender Antivirus is DISABLED")
+            
+    # 2. Check MpsSvc (Windows Firewall)
+    if name == "MpsSvc":
+        if status != "RUNNING":
+            return (FIREWALL_OFF_SCORE, "CRITICAL: Windows Firewall is DISABLED")
+            
+    return (0, "")
+
+def _score_chrome_extensions(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, str]:
+    # 1. Get Agent Data (Incoming)
+    installed_id = log_columns.get("identifier", "").lower().strip()
+    installed_name = log_columns.get("name", "").lower().strip()
+    
+    # 2. Get Blocklist (From Threat Intel)
+    ext_block = kwargs.get("ext_block_list", [])
+
+    for item in ext_block:
+        # Handle the dictionary structure from search (3).json
+        if isinstance(item, dict):
+            blocked_id = item.get("identifier", "").lower().strip()
+            blocked_name = item.get("name", "").lower().strip()
+            description = item.get("description", "Security Policy Violation")
+        else:
+            # Fallback for simple string list
+            blocked_id = str(item).lower().strip()
+            blocked_name = str(item).lower().strip()
+            description = "Blocked Extension"
+
+        # MATCHING LOGIC
+        # Priority 1: Check ID (Exact Match - Most Accurate)
+        if blocked_id and blocked_id == installed_id:
+            return (KNOWN_BAD_ITEM_SCORE, f"Malicious Extension [{description}]: {installed_name} ({installed_id})")
+        
+        # Priority 2: Check Name (Partial Match - Fallback)
+        # e.g. Block "VPN" -> Catch "Free VPN", "Super VPN"
+        if blocked_name and blocked_name in installed_name:
+             return (KNOWN_BAD_ITEM_SCORE, f"Policy Violation [{description}]: {installed_name}")
+
+    return (0, "")
 
 QUERY_SCORING_MAP = {
     "process_events": _score_process_anomaly,
