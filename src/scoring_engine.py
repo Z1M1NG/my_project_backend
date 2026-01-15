@@ -31,7 +31,8 @@ TRUSTED_PATHS = [
     r"c:\program files (x86)\common files",
     r"c:\program files\tailscale",
     r"c:\program files\teamviewer",
-    r"c:\program files\WindowsApps"
+    r"c:\program files\WindowsApps",
+    r"c:\program files\Microsoft GameInput"
 ]
 
 # --- 3. HELPER FUNCTIONS ---
