@@ -29,7 +29,8 @@ TRUSTED_PATHS = [
     r"c:\windows",
     r"c:\program files\windows defender",
     r"c:\program files (x86)\common files",
-    r"c:\program files\tailscale"
+    r"c:\program files\tailscale",
+    r"c:\program files (x86)\Microsoft\Edge\Application"
 ]
 
 # --- 3. HELPER FUNCTIONS ---
