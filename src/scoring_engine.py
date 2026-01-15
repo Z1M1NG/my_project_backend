@@ -30,7 +30,8 @@ TRUSTED_PATHS = [
     r"c:\program files\windows defender",
     r"c:\program files (x86)\common files",
     r"c:\program files\tailscale",
-    r"c:\program files (x86)\Microsoft\Edge\Application"
+    r"c:\program files\teamviewer",
+    r"c:\program files\WindowsApps"
 ]
 
 # --- 3. HELPER FUNCTIONS ---
