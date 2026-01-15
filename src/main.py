@@ -13,7 +13,7 @@ from colorama import Fore, init
 init(autoreset=True)
 
 # --- CONFIGURATION ---
-AI_COOLDOWN_SECONDS = 300 
+AI_COOLDOWN_SECONDS = 180 
 last_ai_call = {}
 AI_MODEL_NAME = 'gemma2:2b'
 
@@ -76,7 +76,7 @@ async def run_ai_analysis(host: str, client_ip: str, total_score: int, risks: Li
     prompt = (
         f"Role: Tier 3 Security Analyst. System: '{host}' (IP: {client_ip}) (Score: {total_score}).\n"
         f"Input Logs (Top Risks):\n{sorted_risks}\n\n"
-        f"Task: Generate a strict security report based ONLY on the provided logs.\n"
+        f"Task: Generate a strict security report based ONLY on the provided logs and based on the given format.\n"
         f"Rules:\n"
         f"1. If a log says 'Blocked Application' or 'Blocked Extension', explicitly name it.\n"
         f"2. Ignore generic system processes unless explicitly blocked.\n"
@@ -84,9 +84,9 @@ async def run_ai_analysis(host: str, client_ip: str, total_score: int, risks: Li
         f"Output Format:\n"
         f"**Summary:** <One clear sentence>\n"
         f"**Verdict:** <Critical Malware / Policy Violation / C2 Activity>\n"
-        f"**Detected Threats:**\n"
-        f"- <Name> : <Reason>\n"
-        f"**Action:**\n"
+        f"**Detected Threats (in point form):**\n"
+        f" Provide all the threats in point form alongside their Specific Name and Reason\n"
+        f"**Action (in point form):**\n"
         f"- <Specific Step 1>\n"
         f"- <Specific Step 2>"
     )
