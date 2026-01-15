@@ -151,7 +151,7 @@ def _score_listening_ports(log_columns: Dict[str, Any], **kwargs) -> Tuple[int, 
     
     # RISKY PORTS LIST (Common targets for attackers)
     # 21=FTP, 22=SSH, 23=Telnet, 445=SMB(WannaCry), 3389=RDP, 135=RPC
-    RISKY_PORTS = ["21", "22", "23", "445", "3389", "135"]
+    RISKY_PORTS = ["21", "22", "23", "3389"]
     
     # Logic: If a risky port is listening on "0.0.0.0" (All Interfaces), it's a major risk.
     if address == "0.0.0.0" and port in RISKY_PORTS:
